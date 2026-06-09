@@ -2,6 +2,8 @@ package main
 
 import (
 	"cinema-booking/backend/config"
+	"cinema-booking/backend/internal/auth"
+	"cinema-booking/backend/internal/seat"
 	"cinema-booking/backend/internal/seed"
 	"cinema-booking/backend/internal/store"
 	"context"
@@ -29,14 +31,12 @@ func main() {
 
 	db := mongoClient.Database(cfg.MongoDB)
 
-	// Ensure indexes (idempotent — safe on every startup).
 	idxCtx, idxCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := store.EnsureIndexes(idxCtx, db); err != nil {
 		log.Fatalf("startup: %v", err)
 	}
 	idxCancel()
 
-	// Optional seed (controlled by SEED_ON_START=true).
 	if cfg.SeedOnStart {
 		seedCtx, seedCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		if err := seed.Run(seedCtx, db); err != nil {
@@ -45,9 +45,30 @@ func main() {
 		seedCancel()
 	}
 
+	authHandler := auth.NewHandler(cfg, db)
+	seatHandler := seat.NewHandler(db, rdb)
+
 	r := gin.New()
 	r.Use(gin.Recovery())
+
+	// Health
 	r.GET("/healthz", healthzHandler(mongoClient, rdb))
+
+	// OAuth flow
+	r.GET("/auth/google/login", authHandler.Login)
+	r.GET("/auth/google/callback", authHandler.Callback)
+
+	// Dev-only token minting — never registered unless DEV_AUTH=true
+	if cfg.DevAuth {
+		log.Println("WARNING: DEV_AUTH=true — /dev/token endpoint is active (not for production)")
+		r.POST("/dev/token", authHandler.DevToken)
+	}
+
+	// Protected API
+	api := r.Group("/api", auth.Middleware(cfg))
+	{
+		api.GET("/showtimes/:showtimeId/seats", seatHandler.GetSeatMap)
+	}
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.ServerPort,
@@ -112,7 +133,6 @@ func healthzHandler(mc *mongo.Client, rdb *redis.Client) gin.HandlerFunc {
 	}
 }
 
-// connectMongo dials MongoDB with linear backoff, fatally exiting if it never becomes reachable.
 func connectMongo(cfg *config.Config) *mongo.Client {
 	const maxAttempts = 10
 	var lastErr error
@@ -136,7 +156,6 @@ func connectMongo(cfg *config.Config) *mongo.Client {
 	return nil
 }
 
-// connectRedis dials Redis with linear backoff, fatally exiting if it never becomes reachable.
 func connectRedis(cfg *config.Config) *redis.Client {
 	const maxAttempts = 10
 	rdb := redis.NewClient(&redis.Options{

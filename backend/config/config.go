@@ -41,6 +41,7 @@ type Config struct {
 
 	// Development / demo
 	SeedOnStart bool // SEED_ON_START — if "true", run the idempotent seed on startup
+	DevAuth     bool // DEV_AUTH — if "true", enable POST /dev/token (never set in production)
 }
 
 // Load reads all settings from the environment and returns a validated Config.
@@ -103,6 +104,7 @@ func Load() (*Config, error) {
 	}
 
 	cfg.SeedOnStart = optional("SEED_ON_START", "false") == "true"
+	cfg.DevAuth = optional("DEV_AUTH", "false") == "true"
 
 	if len(errs) > 0 {
 		return nil, errors.New("configuration errors:\n  - " + strings.Join(errs, "\n  - "))

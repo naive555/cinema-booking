@@ -52,11 +52,7 @@ Do not spend effort there.
 - External deps (Mongo, Redis) connected with retry/backoff on startup and a
   graceful shutdown.
 
-## Current phase: DAY 0 — SCAFFOLD ONLY
-Today we build infrastructure and skeleton, nothing else.
-DO: repo init, folder structure, docker-compose with healthchecks, backend
-Dockerfile, typed config from env, Mongo+Redis connections with retry, a
-/healthz endpoint, domain structs, the bookings unique index, README
-architecture section.
-DO NOT YET: implement OAuth, booking logic, the Redis lock itself, WebSocket, or
-the queue consumer. Leave clear package stubs / TODOs for them.
+## Current phase: DAY 1 — AUTH + SEAT-MAP READ PATH
+DO: Google OAuth login/callback, JWT minting with a role claim, auth middleware,
+role middleware, GET seat map (merge Mongo booked + Redis locked).
+DO NOT YET: the Redis lock, booking writes, payment, WebSocket, queue consumer.

@@ -68,8 +68,57 @@ flowchart TD
 
 ## 3. Booking Flow
 
-> **To be completed in DAY 1.**
-> Will cover: seat availability check -> Redis lock acquisition -> Mongo booking insert -> stream publish -> lock release -> WebSocket broadcast. Sequence diagram and error paths TBD.
+### Auth flow (implemented)
+
+```
+Browser                  Backend                 Google
+  |                         |                      |
+  |-- GET /auth/google/login|                      |
+  |                         |-- redirect --------->|
+  |<------- 302 to consent--|                      |
+  |                         |                      |
+  |<-- GET /auth/google/callback?code=...&state=...|
+  |                         |-- exchange code ----->|
+  |                         |<-- access token ------|
+  |                         |-- GET /userinfo ------>|
+  |                         |<-- {email, name} ------|
+  |                         |                      |
+  |                         | upsert users (Mongo)
+  |                         | resolve role (ADMIN_EMAILS)
+  |                         | mint JWT (HS256)
+  |<-- 200 {"token":"..."} -|
+```
+
+CSRF protection: a random 16-byte hex state is set as an `httpOnly` cookie before the redirect. On callback the query param is compared against the cookie and the cookie is immediately cleared.
+
+JWT payload:
+```json
+{
+  "sub":   "<mongo ObjectID hex>",
+  "email": "user@example.com",
+  "role":  "USER",
+  "iat":   1234567890,
+  "exp":   1234567890
+}
+```
+
+Subsequent requests must carry `Authorization: Bearer <token>`.
+
+### Seat map read (implemented)
+
+`GET /api/showtimes/:showtimeId/seats` — requires valid JWT. Returns all seats annotated with their status, derived at read time by merging two sources:
+
+| Status | Source |
+|--------|--------|
+| BOOKED | Booking document exists in MongoDB |
+| LOCKED | Redis key `seat:lock:{showtimeId}:{seatId}` exists |
+| AVAILABLE | Neither |
+
+Redis unavailability degrades gracefully to AVAILABLE (lock state is ephemeral; the Mongo unique index remains the hard safety net).
+
+### Booking write flow (DAY 2 — not yet implemented)
+
+Seat availability check -> Redis `SET NX EX` lock acquire -> Mongo booking insert -> Redis Streams publish -> Lua script lock release -> WebSocket broadcast. See §4 for lock details.
 
 ---
 
@@ -146,8 +195,58 @@ RabbitMQ would be the right choice in a polyglot microservice environment. Here,
 
 ## 6. Running Locally
 
-> **To be completed.**
-> Will be: `cp .env.example .env` (fill in OAuth credentials) -> `docker compose up --build`. One command, no other setup.
+### Prerequisites
+
+Docker and Docker Compose. Nothing else.
+
+### Steps
+
+```bash
+# 1. Copy the example env file and fill in your Google OAuth credentials
+cp .env.example .env
+# Edit .env: set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, JWT_SECRET
+
+# 2. Start everything
+docker compose up --build
+
+# 3. Verify
+curl http://localhost:8080/healthz
+# {"mongo":"ok","redis":"ok","status":"ok"}
+```
+
+The Google OAuth consent screen requires a registered redirect URI. In Google Cloud Console, add `http://localhost:8080/auth/google/callback` as an authorised redirect URI for your OAuth 2.0 client.
+
+### Seeding demo data
+
+```bash
+SEED_ON_START=true docker compose up -d --force-recreate backend
+# Seeds 2 showtimes (Inception, Interstellar) and 80 seats (rows A-E × 1-8)
+```
+
+### Testing without a browser (DEV_AUTH)
+
+For concurrency / booking testing without a Google OAuth round-trip:
+
+```bash
+# Start with dev auth enabled
+DEV_AUTH=true docker compose up -d --force-recreate backend
+
+# Mint a USER token
+curl -s -X POST http://localhost:8080/dev/token \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"test@example.com","role":"USER"}' | jq .
+
+# Mint an ADMIN token
+curl -s -X POST http://localhost:8080/dev/token \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.com","role":"ADMIN"}' | jq .
+
+# Use the token
+curl -s http://localhost:8080/api/showtimes/000000000000000000000001/seats \
+  -H 'Authorization: Bearer <token>' | jq .
+```
+
+`DEV_AUTH` is **never enabled in production** — the endpoint is not registered unless the flag is `true`.
 
 ---
 
