@@ -3,7 +3,7 @@
 package seed
 
 import (
-	"cinema-booking/internal/domain"
+	"cinema-booking/backend/internal/domain"
 	"context"
 	"fmt"
 	"log"

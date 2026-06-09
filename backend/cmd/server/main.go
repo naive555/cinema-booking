@@ -1,9 +1,9 @@
 package main
 
 import (
-	"cinema-booking/config"
-	"cinema-booking/internal/seed"
-	"cinema-booking/internal/store"
+	"cinema-booking/backend/config"
+	"cinema-booking/backend/internal/seed"
+	"cinema-booking/backend/internal/store"
 	"context"
 	"log"
 	"net/http"

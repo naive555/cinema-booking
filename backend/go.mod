@@ -1,4 +1,4 @@
-module cinema-booking
+module cinema-booking/backend
 
 go 1.26.0
 
