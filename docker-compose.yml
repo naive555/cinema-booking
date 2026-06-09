@@ -43,6 +43,7 @@ services:
       REDIS_PASSWORD:   ""
       JWT_EXPIRY_HOURS: "24"
       LOCK_TTL_SECONDS: "30"
+      SEED_ON_START:    ${SEED_ON_START:-false}
       # secrets: read from .env
       JWT_SECRET:           ${JWT_SECRET}
       GOOGLE_CLIENT_ID:     ${GOOGLE_CLIENT_ID}

@@ -38,6 +38,9 @@ type Config struct {
 
 	// Seat locking
 	LockTTL time.Duration // LOCK_TTL_SECONDS — how long a seat hold lasts
+
+	// Development / demo
+	SeedOnStart bool // SEED_ON_START — if "true", run the idempotent seed on startup
 }
 
 // Load reads all settings from the environment and returns a validated Config.
@@ -98,6 +101,8 @@ func Load() (*Config, error) {
 	} else {
 		cfg.JWTExpiry = time.Duration(jwtHours) * time.Hour
 	}
+
+	cfg.SeedOnStart = optional("SEED_ON_START", "false") == "true"
 
 	if len(errs) > 0 {
 		return nil, errors.New("configuration errors:\n  - " + strings.Join(errs, "\n  - "))

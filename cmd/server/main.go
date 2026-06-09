@@ -2,6 +2,8 @@ package main
 
 import (
 	"cinema-booking/config"
+	"cinema-booking/internal/seed"
+	"cinema-booking/internal/store"
 	"context"
 	"log"
 	"net/http"
@@ -24,6 +26,24 @@ func main() {
 
 	mongoClient := connectMongo(cfg)
 	rdb := connectRedis(cfg)
+
+	db := mongoClient.Database(cfg.MongoDB)
+
+	// Ensure indexes (idempotent — safe on every startup).
+	idxCtx, idxCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := store.EnsureIndexes(idxCtx, db); err != nil {
+		log.Fatalf("startup: %v", err)
+	}
+	idxCancel()
+
+	// Optional seed (controlled by SEED_ON_START=true).
+	if cfg.SeedOnStart {
+		seedCtx, seedCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := seed.Run(seedCtx, db); err != nil {
+			log.Fatalf("startup: seed: %v", err)
+		}
+		seedCancel()
+	}
 
 	r := gin.New()
 	r.Use(gin.Recovery())
