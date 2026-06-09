@@ -55,7 +55,7 @@ flowchart TD
 
 | Layer | Choice | Why |
 |-------|--------|-----|
-| Backend | Go 1.22 + Gin | Low-overhead goroutines map cleanly onto per-request lock/wait semantics; Gin adds routing without magic |
+| Backend | Go 1.26 + Gin | Low-overhead goroutines map cleanly onto per-request lock/wait semantics; Gin adds routing without magic |
 | Database | MongoDB 7 | Flexible schema for seat/showtime documents; atomic `findAndModify` available as a fallback; driver v2 |
 | Cache / Lock | Redis 7 | Atomic `SET NX EX` for distributed locks; Streams for durable async queue — one infra component does both |
 | Realtime | WebSocket (Gin upgrade) | Push seat-map deltas to all connected clients without polling |
