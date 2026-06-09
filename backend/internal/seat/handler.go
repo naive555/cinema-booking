@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -35,13 +34,14 @@ type SeatView struct {
 // GetSeatMap returns every seat for a showtime annotated with its current status.
 //
 // Status resolution order (highest wins):
-//  1. BOOKED  — a Booking document exists in MongoDB for this seat
-//  2. LOCKED  — a Redis key seat:lock:{showtimeId}:{seatId} exists
+//  1. BOOKED    — a Booking document exists in MongoDB for this seat
+//  2. LOCKED    — a Redis key seat:lock:{showtimeId}:{seatId} exists
 //  3. AVAILABLE — neither of the above
 //
-// Redis unavailability degrades gracefully: locked seats are shown as AVAILABLE
-// rather than returning 500, because lock state is ephemeral and its loss is
-// recoverable (the lock will expire or the next booking attempt will re-acquire).
+// LOCKED detection uses a single MGET over all N seat-lock keys so the Redis
+// round-trips are O(1), not O(N). Redis unavailability degrades locked seats
+// to AVAILABLE rather than returning 500 — lock state is ephemeral and the
+// Mongo unique index remains the hard safety net.
 func (h *Handler) GetSeatMap(c *gin.Context) {
 	showtimeHex := c.Param("showtimeId")
 	showtimeID, err := bson.ObjectIDFromHex(showtimeHex)
@@ -68,7 +68,8 @@ func (h *Handler) GetSeatMap(c *gin.Context) {
 		return
 	}
 
-	lockedIDs, _ := h.fetchLockedIDs(ctx, showtimeHex) // non-fatal
+	// Single MGET round-trip — one key per seat, all fetched at once.
+	lockedIDs, _ := h.fetchLockedIDs(ctx, showtimeHex, seats) // non-fatal
 
 	views := make([]SeatView, 0, len(seats))
 	for _, s := range seats {
@@ -84,6 +85,8 @@ func (h *Handler) GetSeatMap(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"showtimeId": showtimeHex, "seats": views})
 }
+
+// ── data helpers ──────────────────────────────────────────────────────────────
 
 func (h *Handler) fetchSeats(ctx context.Context, showtimeID bson.ObjectID) ([]domain.Seat, error) {
 	cur, err := h.db.Collection("seats").Find(ctx, bson.M{"showtimeId": showtimeID})
@@ -110,24 +113,30 @@ func (h *Handler) fetchBookedIDs(ctx context.Context, showtimeID bson.ObjectID) 
 	return ids, nil
 }
 
-func (h *Handler) fetchLockedIDs(ctx context.Context, showtimeHex string) (map[string]struct{}, error) {
-	pattern := fmt.Sprintf("seat:lock:%s:*", showtimeHex)
+// fetchLockedIDs resolves lock state for every seat in a single MGET call.
+// It builds the exact key list from the known seat IDs, so there is no
+// keyspace scan — O(1) round-trips regardless of how many other keys exist.
+func (h *Handler) fetchLockedIDs(ctx context.Context, showtimeHex string, seats []domain.Seat) (map[string]struct{}, error) {
+	if len(seats) == 0 {
+		return map[string]struct{}{}, nil
+	}
+
+	// Build all lock key names in the same order as seats.
+	keys := make([]string, len(seats))
+	for i, s := range seats {
+		keys[i] = fmt.Sprintf("seat:lock:%s:%s", showtimeHex, s.ID.Hex())
+	}
+
+	// One MGET fetches all values — nil means key absent (AVAILABLE), non-nil means locked.
+	vals, err := h.rdb.MGet(ctx, keys...).Result()
+	if err != nil {
+		return map[string]struct{}{}, err
+	}
+
 	ids := make(map[string]struct{})
-	var cursor uint64
-	for {
-		keys, nextCursor, err := h.rdb.Scan(ctx, cursor, pattern, 100).Result()
-		if err != nil {
-			return ids, err
-		}
-		for _, key := range keys {
-			// key = seat:lock:{showtimeId}:{seatId} — extract the last segment
-			if idx := strings.LastIndex(key, ":"); idx >= 0 {
-				ids[key[idx+1:]] = struct{}{}
-			}
-		}
-		cursor = nextCursor
-		if cursor == 0 {
-			break
+	for i, v := range vals {
+		if v != nil {
+			ids[seats[i].ID.Hex()] = struct{}{}
 		}
 	}
 	return ids, nil

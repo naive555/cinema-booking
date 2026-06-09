@@ -6,6 +6,7 @@ import (
 	"cinema-booking/backend/internal/domain"
 	"cinema-booking/backend/internal/seat"
 	"cinema-booking/backend/internal/seed"
+	"cinema-booking/backend/internal/showtime"
 	"cinema-booking/backend/internal/store"
 	"context"
 	"log"
@@ -46,8 +47,9 @@ func main() {
 		seedCancel()
 	}
 
-	authHandler := auth.NewHandler(cfg, db)
-	seatHandler := seat.NewHandler(db, rdb)
+	authHandler     := auth.NewHandler(cfg, db)
+	seatHandler     := seat.NewHandler(db, rdb)
+	showtimeHandler := showtime.NewHandler(db)
 
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -69,6 +71,7 @@ func main() {
 	api := r.Group("/api", auth.Middleware(cfg))
 	{
 		api.GET("/me", authHandler.Me)
+		api.GET("/showtimes", showtimeHandler.ListShowtimes)
 		api.GET("/showtimes/:showtimeId/seats", seatHandler.GetSeatMap)
 
 		// Admin sub-group — additionally requires role=ADMIN
