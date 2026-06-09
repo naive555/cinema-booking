@@ -102,6 +102,20 @@ func (h *Handler) Callback(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"token": tokenStr})
 }
 
+// Me returns the authenticated caller's identity from the JWT claims.
+func (h *Handler) Me(c *gin.Context) {
+	claims, ok := ClaimsFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "no auth context"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"id":    claims.Subject,
+		"email": claims.Email,
+		"role":  claims.Role,
+	})
+}
+
 // DevToken mints a JWT without an OAuth round-trip.
 // Only registered when DEV_AUTH=true. Never enabled in production.
 func (h *Handler) DevToken(c *gin.Context) {

@@ -3,6 +3,7 @@ package main
 import (
 	"cinema-booking/backend/config"
 	"cinema-booking/backend/internal/auth"
+	"cinema-booking/backend/internal/domain"
 	"cinema-booking/backend/internal/seat"
 	"cinema-booking/backend/internal/seed"
 	"cinema-booking/backend/internal/store"
@@ -64,10 +65,20 @@ func main() {
 		r.POST("/dev/token", authHandler.DevToken)
 	}
 
-	// Protected API
+	// Protected API — all routes require a valid JWT
 	api := r.Group("/api", auth.Middleware(cfg))
 	{
+		api.GET("/me", authHandler.Me)
 		api.GET("/showtimes/:showtimeId/seats", seatHandler.GetSeatMap)
+
+		// Admin sub-group — additionally requires role=ADMIN
+		admin := api.Group("/admin", auth.RequireRole(domain.RoleAdmin))
+		{
+			admin.GET("/ping", func(c *gin.Context) {
+				claims, _ := auth.ClaimsFromContext(c)
+				c.JSON(http.StatusOK, gin.H{"status": "ok", "authed_as": claims.Email})
+			})
+		}
 	}
 
 	srv := &http.Server{
