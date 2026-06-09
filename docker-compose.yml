@@ -1,0 +1,55 @@
+services:
+
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  backend:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # non-sensitive: hardcoded for one-command-up convenience
+      SERVER_PORT:      "8080"
+      MONGO_URI:        "mongodb://mongo:27017"
+      MONGO_DB:         "cinema"
+      REDIS_ADDR:       "redis:6379"
+      REDIS_PASSWORD:   ""
+      JWT_EXPIRY_HOURS: "24"
+      LOCK_TTL_SECONDS: "30"
+      # secrets: read from .env
+      JWT_SECRET:           ${JWT_SECRET}
+      GOOGLE_CLIENT_ID:     ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_REDIRECT_URL:  ${GOOGLE_REDIRECT_URL:-http://localhost:8080/auth/google/callback}
+      ADMIN_EMAILS:         ${ADMIN_EMAILS:-admin@example.com}
+
+volumes:
+  mongo_data:
+  redis_data:
