@@ -26,7 +26,7 @@
         @click="devLogin"
         :disabled="loading"
         style="width:100%;padding:10px;background:#333;color:#fff;border:none;border-radius:4px;font-size:0.95rem"
-      >{{ loading ? 'Signing in…' : 'Dev Login' }}</button>
+      >{{ loading ? 'Signing in…' : 'Admin Login' }}</button>
       <p v-if="error" style="color:#e94560;margin-top:8px;font-size:0.9em">{{ error }}</p>
     </template>
   </div>
