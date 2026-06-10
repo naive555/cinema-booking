@@ -3,7 +3,9 @@ package main
 import (
 	"cinema-booking/backend/config"
 	"cinema-booking/backend/internal/auth"
+	"cinema-booking/backend/internal/booking"
 	"cinema-booking/backend/internal/domain"
+	"cinema-booking/backend/internal/lock"
 	"cinema-booking/backend/internal/seat"
 	"cinema-booking/backend/internal/seed"
 	"cinema-booking/backend/internal/showtime"
@@ -47,7 +49,9 @@ func main() {
 		seedCancel()
 	}
 
+	lockClient      := lock.New(rdb)
 	authHandler     := auth.NewHandler(cfg, db)
+	bookingHandler  := booking.NewHandler(db, lockClient, cfg.LockTTL)
 	seatHandler     := seat.NewHandler(db, rdb)
 	showtimeHandler := showtime.NewHandler(db)
 
@@ -73,6 +77,8 @@ func main() {
 		api.GET("/me", authHandler.Me)
 		api.GET("/showtimes", showtimeHandler.ListShowtimes)
 		api.GET("/showtimes/:showtimeId/seats", seatHandler.GetSeatMap)
+		api.POST("/showtimes/:showtimeId/seats/:seatId/select", bookingHandler.Select)
+		api.POST("/showtimes/:showtimeId/seats/:seatId/pay", bookingHandler.Pay)
 
 		// Admin sub-group — additionally requires role=ADMIN
 		admin := api.Group("/admin", auth.RequireRole(domain.RoleAdmin))

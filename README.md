@@ -116,9 +116,26 @@ Subsequent requests must carry `Authorization: Bearer <token>`.
 
 Redis unavailability degrades gracefully to AVAILABLE (lock state is ephemeral; the Mongo unique index remains the hard safety net).
 
-### Booking write flow (DAY 2 — not yet implemented)
+### Booking write flow (implemented)
 
-Seat availability check -> Redis `SET NX EX` lock acquire -> Mongo booking insert -> Redis Streams publish -> Lua script lock release -> WebSocket broadcast. See §4 for lock details.
+```
+POST /api/showtimes/:showtimeId/seats/:seatId/select
+  1. Reject if seat already BOOKED in Mongo (CountDocuments).
+  2. SET NX EX  ->  acquire lock, receive ownerToken UUID.
+  3. 409 if another holder already owns the lock.
+  4. Return {ownerToken, expiresAt}.  Write SEAT_LOCKED audit.
+
+POST /api/showtimes/:showtimeId/seats/:seatId/pay
+  body: {"ownerToken": "<uuid>"}
+  1. Lua GET+compare -> verify caller still owns lock (Owned / Expired / WrongOwner).
+  2. 410 "hold expired, reselect" if not Owned.  Write BOOKING_TIMEOUT or LOCK_FAIL audit.
+  3. InsertOne booking into Mongo.
+  4. Unique index {showtimeId, seatId} fires on duplicate -> 409.
+  5. Release lock (Lua DEL if owner matches — non-fatal if TTL already fired).
+  6. Return 200.  Write BOOKING_SUCCESS audit.
+```
+
+**ownerToken design choice:** `select` returns the raw UUID lock token to the client, which must echo it back in `pay`. This is explicit and simple for a take-home assessment — the token proves the client holds the current lock. The alternative (storing the token server-side in a session or short-lived JWT) would add complexity without improving the correctness guarantee, which lives in the Lua ownership check and the Mongo unique index regardless.
 
 ---
 

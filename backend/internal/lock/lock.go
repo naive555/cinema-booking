@@ -20,6 +20,29 @@ else
 end
 `)
 
+// checkScript returns: 1 if caller owns the lock, -1 if the key is absent
+// (lock expired), 0 if the key exists but belongs to a different owner.
+// All three branches are evaluated atomically at the Redis server.
+var checkScript = redis.NewScript(`
+local v = redis.call("GET", KEYS[1])
+if v == false then
+    return -1
+elseif v == ARGV[1] then
+    return 1
+else
+    return 0
+end
+`)
+
+// OwnershipStatus is the result of CheckOwnership.
+type OwnershipStatus int
+
+const (
+	Owned      OwnershipStatus = 1  // caller still holds the lock
+	Expired    OwnershipStatus = -1 // key is absent; TTL elapsed
+	WrongOwner OwnershipStatus = 0  // key exists but belongs to someone else
+)
+
 // Client wraps a Redis client with seat-lock operations.
 type Client struct {
 	rdb *redis.Client
@@ -62,4 +85,14 @@ func (c *Client) Release(ctx context.Context, key, ownerToken string) (released 
 		return false, fmt.Errorf("lock release %q: %w", key, err)
 	}
 	return res == 1, nil
+}
+
+// CheckOwnership atomically reports whether key is still held by ownerToken.
+// The three possible outcomes are Owned, Expired, and WrongOwner.
+func (c *Client) CheckOwnership(ctx context.Context, key, ownerToken string) (OwnershipStatus, error) {
+	res, err := checkScript.Run(ctx, c.rdb, []string{key}, ownerToken).Int()
+	if err != nil {
+		return WrongOwner, fmt.Errorf("lock check %q: %w", key, err)
+	}
+	return OwnershipStatus(res), nil
 }
