@@ -74,21 +74,15 @@ func (h *Handler) Select(c *gin.Context) {
 
 	h.writeAudit(ctx, "SEAT_LOCKED", claims, showtimeID, seatID, nil)
 
-	// Broadcast and publish are best-effort — never fail the HTTP request on their errors.
+	// Broadcast is best-effort — never fail the HTTP request on its error.
+	// The stream (Redis Streams) is used only for BOOKING_SUCCESS; SEAT_LOCKED
+	// is written inline because it is cheap and does not need async processing.
 	h.hub.Broadcast(showtimeHex, realtime.Event{
 		Type:   "SEAT_LOCKED",
 		SeatID: seatHex,
 		Status: string(domain.StatusLocked),
 		At:     time.Now(),
 	})
-	if err := h.q.Publish(ctx, queue.Event{
-		ShowtimeID: showtimeHex,
-		SeatID:     seatHex,
-		UserID:     claims.RegisteredClaims.Subject,
-		Action:     "SEAT_LOCKED",
-	}); err != nil {
-		log.Printf("booking: queue publish SEAT_LOCKED: %v", err)
-	}
 
 	c.JSON(http.StatusOK, selectResp{
 		OwnerToken: ownerToken,
@@ -153,8 +147,6 @@ func (h *Handler) Pay(c *gin.Context) {
 	// Booking committed — release the lock. Non-fatal if TTL already fired.
 	h.locker.Release(ctx, key, req.OwnerToken) //nolint:errcheck
 
-	h.writeAudit(ctx, "BOOKING_SUCCESS", claims, showtimeID, seatID, nil)
-
 	bookingID := ""
 	if oid, ok := res.InsertedID.(bson.ObjectID); ok {
 		bookingID = oid.Hex()
@@ -166,14 +158,20 @@ func (h *Handler) Pay(c *gin.Context) {
 		Status: string(domain.StatusBooked),
 		At:     time.Now(),
 	})
+
+	// Audit log and user notification are written ASYNCHRONOUSLY by the stream
+	// consumer. Do NOT call writeAudit here — that would duplicate the entry.
 	if err := h.q.Publish(ctx, queue.Event{
+		Action:     "BOOKING_SUCCESS",
 		BookingID:  bookingID,
 		ShowtimeID: showtimeHex,
 		SeatID:     seatHex,
 		UserID:     claims.RegisteredClaims.Subject,
-		Action:     "SEAT_BOOKED",
+		UserEmail:  claims.Email,
 	}); err != nil {
-		log.Printf("booking: queue publish SEAT_BOOKED: %v", err)
+		// Publish failure means the audit and notification will be lost for this
+		// booking. Log loudly; in production add a dead-letter / retry path.
+		log.Printf("booking: CRITICAL stream publish failed for booking %s: %v", bookingID, err)
 	}
 
 	c.JSON(http.StatusOK, gin.H{

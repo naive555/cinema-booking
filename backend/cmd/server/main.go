@@ -73,18 +73,41 @@ func main() {
 	})
 
 	// ── queue client + async consumer ─────────────────────────────────────────
+	// The consumer reads BOOKING_SUCCESS events from the Redis Stream and:
+	//   (a) writes the AuditLog to Mongo   — durable record of every confirmed booking
+	//   (b) sends a mock email notification — replace with real mailer in production
+	// XACK is sent only after both steps succeed; on failure the message stays
+	// in the PEL and will be redelivered on next startup or via XAUTOCLAIM.
 	qClient := queue.New(rdb)
 	go qClient.StartConsumer(appCtx, "cinema-consumers", "consumer-1", func(ev queue.Event) error {
-		// Mock notification: log the event. Replace with email/push/webhook in production.
-		log.Printf("[notification] action=%s showtime=%s seat=%s user=%s bookingId=%s",
-			ev.Action, ev.ShowtimeID, ev.SeatID, ev.UserID, ev.BookingID)
-		return nil
+		stid, _ := bson.ObjectIDFromHex(ev.ShowtimeID)
+		seatOID, _ := bson.ObjectIDFromHex(ev.SeatID)
+		userOID, _ := bson.ObjectIDFromHex(ev.UserID)
+
+		// (a) Write audit log — the consumer is the ONLY writer for BOOKING_SUCCESS.
+		_, err := db.Collection("audit_logs").InsertOne(context.Background(), domain.AuditLog{
+			Action:     ev.Action,
+			UserID:     userOID,
+			ShowtimeID: stid,
+			SeatID:     seatOID,
+			Meta:       map[string]interface{}{"bookingId": ev.BookingID, "source": "stream-consumer"},
+			CreatedAt:  time.Now(),
+		})
+		if err != nil {
+			log.Printf("consumer: audit write failed (will retry): %v", err)
+			return err // do NOT ack — message stays in PEL for redelivery
+		}
+
+		// (b) Mock notification — in production send email/push/webhook here.
+		log.Printf("NOTIFY: emailed %s about booking %s (showtime=%s seat=%s)",
+			ev.UserEmail, ev.BookingID, ev.ShowtimeID, ev.SeatID)
+		return nil // success -> XACK
 	})
 
-	lockClient      := lock.New(rdb)
-	authHandler     := auth.NewHandler(cfg, db)
-	bookingHandler  := booking.NewHandler(db, lockClient, cfg.LockTTL, wsHub, qClient)
-	seatHandler     := seat.NewHandler(db, rdb)
+	lockClient := lock.New(rdb)
+	authHandler := auth.NewHandler(cfg, db)
+	bookingHandler := booking.NewHandler(db, lockClient, cfg.LockTTL, wsHub, qClient)
+	seatHandler := seat.NewHandler(db, rdb)
 	showtimeHandler := showtime.NewHandler(db)
 
 	r := gin.New()

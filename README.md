@@ -183,30 +183,61 @@ Even if lock logic has a latent bug, the compound unique index on `bookings { sh
 
 ### What it does
 
-On every successful booking, the booking handler publishes an event to the `booking.events` stream:
+`POST .../pay` does **not** write the audit log inline. Instead it publishes a `BOOKING_SUCCESS` event to the Redis Stream `events:booking` and returns 200 immediately. A background consumer goroutine reads the stream and:
+
+1. Writes a `BOOKING_SUCCESS` `AuditLog` document to MongoDB — the consumer is the **only** writer for this action, so the audit row is proof the async path ran.
+2. Logs a mock notification: `NOTIFY: emailed <user> about booking <id>` — replace with a real mailer in production.
+3. Sends `XACK` only after both steps succeed; on failure the message stays in the **PEL** (Pending Entry List) and will be redelivered on next consumer startup.
 
 ```
-XADD booking.events * bookingId <id> showtimeId <id> seatId <id> userId <id> action BOOKED
+# Stream key
+XADD events:booking * event '{"action":"BOOKING_SUCCESS","bookingId":"...","userId":"...","userEmail":"...","showtimeId":"...","seatId":"..."}'
+
+# Consumer group
+XGROUP CREATE events:booking cinema-consumers $ MKSTREAM
+XREADGROUP GROUP cinema-consumers consumer-1 COUNT 10 BLOCK 2000 STREAMS events:booking >
+XACK events:booking cinema-consumers <message-id>
 ```
 
-A background consumer group (`XREADGROUP GROUP cinema-consumers consumer-1`) reads these events and:
-1. Writes an `AuditLog` document to MongoDB (durable record of every state change).
-2. Notifies the WebSocket hub so all connected clients receive a seat-map update.
+#### Async path — recorded evidence
+
+```
+# (1) Event in the stream (XRANGE events:booking - +)
+1781081403904-0
+event {"action":"BOOKING_SUCCESS","bookingId":"6a29253b9539d4af7c263a56",
+       "showtimeId":"000000000000000000000001","seatId":"6a27f28742ab1a2c542913ea",
+       "userId":"6a29253b9539d4af7c263a53","userEmail":"stream-user@test.com"}
+
+# (2) Consumer notification log
+2026/06/10 08:50:03 NOTIFY: emailed stream-user@test.com about booking 6a29253b9539d4af7c263a56
+                    (showtime=000000000000000000000001 seat=6a27f28742ab1a2c542913ea)
+
+# (3) Audit-log row written BY THE CONSUMER (meta.source = "stream-consumer")
+{
+  _id:        ObjectId('6a29253b9539d4af7c263a57'),
+  action:     'BOOKING_SUCCESS',
+  userId:     ObjectId('6a29253b9539d4af7c263a53'),
+  showtimeId: ObjectId('000000000000000000000001'),
+  seatId:     ObjectId('6a27f28742ab1a2c542913ea'),
+  meta:       { bookingId: '6a29253b9539d4af7c263a56', source: 'stream-consumer' },
+  createdAt:  ISODate('2026-06-10T08:50:03.905Z')
+}
+```
 
 ### Why Redis Streams over Pub/Sub
 
 | Property | Pub/Sub | Streams |
 |----------|---------|---------|
-| Durability | No — messages are lost if no subscriber is connected | Yes — messages persist in the log |
-| Consumer groups | No | Yes — multiple consumers, each message ACKed exactly once |
-| Replay / backfill | No | Yes — new consumers can read from any offset |
+| Durability | No — messages lost if no subscriber connected | Yes — persist in the log until trimmed |
+| Consumer groups | No | Yes — multiple consumers, each message delivered once |
+| Replay / backfill | No | Yes — new consumers can read from any past offset |
 | At-least-once delivery | No | Yes — unACKed messages stay in the PEL for retry |
 
-Pub/Sub would work if the consumer were always running and we accepted lost events on restart. For an audit log that is a non-starter.
+Pub/Sub would work if the consumer were always running and we accepted lost events on restart. For an audit log that is a non-starter: a restart during a booking storm would silently drop records.
 
 ### Why Streams over RabbitMQ
 
-RabbitMQ would be the right choice in a polyglot microservice environment. Here, Redis already exists for locking. Adding RabbitMQ would mean a third infra component, a longer `docker-compose.yml`, a separate Go AMQP client, and a more complex `docker compose up`. The Streams API gives us consumer groups and durability without that cost. For a single-service system under interview conditions this is the correct trade-off.
+RabbitMQ is the right choice in a polyglot microservice environment where teams own separate services. Here, Redis already exists for locking. Adding RabbitMQ means a third infra component, a longer `docker-compose.yml`, a separate Go AMQP client, and additional ops surface area. The Streams API gives consumer groups, durable delivery, and replay without any of that cost. For a single-service system this is the correct trade-off; revisit when (if) a separate notification service is carved out.
 
 ---
 
