@@ -303,6 +303,31 @@ Event types pushed over WebSocket:
 | `SEAT_BOOKED` | `POST .../pay` succeeds |
 | `SEAT_RELEASED` | Redis lock TTL fires (key expiry via keyspace notification) |
 
+#### Seat-release-on-timeout — recorded timeline
+
+`LOCK_TTL_SECONDS=15`. Select a seat, do NOT pay, observe the WS client:
+
+```
+[T+  0.0s] seat 6a27f28742ab1a2c5429143a (A-2) status=AVAILABLE
+[T+  0.0s] WS observer connected
+[T+  0.0s] WS frame: {"type":"SEAT_LOCKED","seatId":"6a27f28742ab1a2c5429143a","status":"LOCKED","at":"..."}
+[T+  0.0s] POST select -> ownerToken=bae88060... expiresAt=2026-06-10T08:37:00Z
+[T+  0.0s] seat-map status=LOCKED
+[T+ 15.2s] WS frame: {"type":"SEAT_RELEASED","seatId":"6a27f28742ab1a2c5429143a","status":"AVAILABLE","at":"..."}
+[T+ 15.2s] seat-map status=AVAILABLE
+
+PASS: lock expired -> WS SEAT_RELEASED received -> seat-map AVAILABLE
+```
+
+#### Keyspace notifications — trade-off
+
+Redis keyspace notifications (`notify-keyspace-events Ex`) are **best-effort** (at-most-once):
+
+- A Redis restart or a heavily loaded server may miss some expired-key events.
+- A connected client that misses a `SEAT_RELEASED` frame will not know the seat is free until it refreshes.
+
+This is acceptable because the seat-map read path (`GET .../seats`) is the **source of truth**: it recomputes status from live Redis + Mongo on every call, so a missed WebSocket notification only delays a UI refresh — it never causes an incorrect booking. The Redis TTL still fires and the key is still deleted; only the notification is potentially lost, not the state change itself.
+
 ### Admin endpoints
 
 ```bash
@@ -352,6 +377,9 @@ Accepted. A multi-node cluster would require Redlock or a different locking sche
 
 **Lock TTL determines maximum hold time**
 If a user acquires a lock and then closes the tab, the seat is released after `LOCK_TTL_SECONDS`. There is no explicit "cancel reservation" flow yet. The TTL is the safety valve.
+
+**Keyspace notifications are best-effort, not the source of truth**
+`notify-keyspace-events Ex` is set on the Redis service in docker-compose and the backend subscribes to `__keyevent@0__:expired` to broadcast `SEAT_RELEASED` over WebSocket. Redis delivers at most once — a missed event means a connected client's UI is stale until it polls again. This never causes an incorrect booking because: (1) the TTL still fires and the Redis key is deleted regardless of notification delivery; (2) `GET .../seats` always recomputes status from live Redis+Mongo and will return `AVAILABLE` correctly even if the WS push was lost.
 
 **Roles are minted at login, not dynamically updated**
 `ADMIN_EMAILS` is an env allowlist checked at OAuth callback time. The role is baked into the JWT. Revoking admin access requires the token to expire (up to `JWT_EXPIRY_HOURS`) or a deploy with the email removed from the allowlist. Acceptable for an internal admin use case; not acceptable for a fine-grained RBAC system.

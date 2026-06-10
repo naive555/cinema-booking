@@ -22,6 +22,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
@@ -58,7 +59,18 @@ func main() {
 	// ── realtime hub ──────────────────────────────────────────────────────────
 	wsHub := realtime.NewHub()
 	go wsHub.Run()
-	go wsHub.WatchLockExpiry(appCtx, rdb)
+	go wsHub.WatchLockExpiry(appCtx, rdb, func(showtimeID, seatID string) {
+		// Write a system-triggered audit entry; no user context available at expiry time.
+		stid, _ := bson.ObjectIDFromHex(showtimeID)
+		seat, _ := bson.ObjectIDFromHex(seatID)
+		db.Collection("audit_logs").InsertOne(context.Background(), domain.AuditLog{ //nolint:errcheck
+			Action:     "SEAT_RELEASED",
+			ShowtimeID: stid,
+			SeatID:     seat,
+			CreatedAt:  time.Now(),
+		})
+		log.Printf("audit: SEAT_RELEASED showtime=%s seat=%s", showtimeID, seatID)
+	})
 
 	// ── queue client + async consumer ─────────────────────────────────────────
 	qClient := queue.New(rdb)

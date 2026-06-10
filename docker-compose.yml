@@ -15,6 +15,10 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # Enable keyspace expiry notifications so the backend receives an event
+    # when a seat:lock:* key TTL fires. "E" = keyevent (per-key channel),
+    # "x" = expired events. See: https://redis.io/docs/manual/keyspace-notifications/
+    command: redis-server --notify-keyspace-events Ex
     volumes:
       - redis_data:/data
     healthcheck:
@@ -42,7 +46,8 @@ services:
       REDIS_ADDR:       "redis:6379"
       REDIS_PASSWORD:   ""
       JWT_EXPIRY_HOURS: "24"
-      LOCK_TTL_SECONDS: "30"
+      # 15s for demo (observe expiry quickly); set to 300 for real use
+      LOCK_TTL_SECONDS: ${LOCK_TTL_SECONDS:-15}
       SEED_ON_START:    ${SEED_ON_START:-false}
       DEV_AUTH:         ${DEV_AUTH:-false}
       # secrets: read from .env

@@ -102,12 +102,26 @@ func (h *Hub) Broadcast(showtimeID string, ev Event) {
 	h.broadcast <- roomMsg{showtimeID: showtimeID, payload: b}
 }
 
-// WatchLockExpiry enables Redis keyspace expiry notifications and broadcasts
-// SEAT_RELEASED whenever a seat:lock:* key expires. Blocks until ctx is done.
-func (h *Hub) WatchLockExpiry(ctx context.Context, rdb *redis.Client) {
+// OnExpiryFunc is called (in its own goroutine) for each expired seat lock.
+// showtimeID and seatID are the hex strings extracted from the key name.
+// Use it to write audit logs or trigger other side-effects without blocking
+// the subscription loop.
+type OnExpiryFunc func(showtimeID, seatID string)
+
+// WatchLockExpiry subscribes to Redis keyspace expiry events and broadcasts
+// SEAT_RELEASED whenever a seat:lock:* key expires naturally (TTL fired).
+// onExpiry is called concurrently for each event; pass nil to skip the callback.
+// Blocks until ctx is done.
+//
+// notify-keyspace-events must be set to "Ex" (or a superset) on the Redis
+// server. This is done via docker-compose (redis command flag) so the setting
+// survives Redis restarts. The ConfigSet call below is a belt-and-suspenders
+// fallback for non-compose environments.
+func (h *Hub) WatchLockExpiry(ctx context.Context, rdb *redis.Client, onExpiry OnExpiryFunc) {
+	// Belt-and-suspenders: ensure the setting is active even when running
+	// outside docker-compose (e.g. a developer's local Redis instance).
 	if err := rdb.ConfigSet(ctx, "notify-keyspace-events", "Ex").Err(); err != nil {
-		log.Printf("realtime: cannot enable keyspace notifications: %v — expiry broadcasts disabled", err)
-		return
+		log.Printf("realtime: ConfigSet notify-keyspace-events failed: %v (continuing — flag may already be set via redis.conf)", err)
 	}
 
 	pubsub := rdb.PSubscribe(ctx, "__keyevent@0__:expired")
@@ -133,6 +147,9 @@ func (h *Hub) WatchLockExpiry(ctx context.Context, rdb *redis.Client) {
 				Status: "AVAILABLE",
 				At:     time.Now(),
 			})
+			if onExpiry != nil {
+				go onExpiry(sid, seatID)
+			}
 		}
 	}
 }
