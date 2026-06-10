@@ -272,6 +272,49 @@ ok  	cinema-booking/backend/test	2.544s
 
 50 goroutines race simultaneously for the same seat. Exactly 1 wins; 49 receive a conflict. Zero double bookings.
 
+### WebSocket realtime demo
+
+Connect two clients to the same showtime, then trigger a seat select from a third user. Both observers receive the event simultaneously.
+
+```bash
+# Two observer terminals (requires websocat, or use the Python snippet below)
+TOKEN=$(curl -s -X POST http://localhost:8080/dev/token \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"alice@test.com","role":"USER"}' | jq -r .token)
+websocat -H "Authorization: Bearer $TOKEN" \
+  "ws://localhost:8080/api/ws?showtimeId=000000000000000000000001"
+```
+
+Recorded output (two clients, one select call):
+
+```
+=== WebSocket frames received ===
+Alice frame : {"type":"SEAT_LOCKED","seatId":"6a27f28742ab1a2c542913ea","status":"LOCKED","at":"2026-06-10T07:58:16.627Z"}
+Bob   frame : {"type":"SEAT_LOCKED","seatId":"6a27f28742ab1a2c542913ea","status":"LOCKED","at":"2026-06-10T07:58:16.627Z"}
+
+PASS -- both clients received SEAT_LOCKED for the correct seat
+```
+
+Event types pushed over WebSocket:
+
+| Event | Trigger |
+|-------|---------|
+| `SEAT_LOCKED` | `POST .../select` succeeds |
+| `SEAT_BOOKED` | `POST .../pay` succeeds |
+| `SEAT_RELEASED` | Redis lock TTL fires (key expiry via keyspace notification) |
+
+### Admin endpoints
+
+```bash
+ADMIN=$(curl -s -X POST http://localhost:8080/dev/token \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@cinema.com","role":"ADMIN"}' | jq -r .token)
+
+# List all bookings (optionally filter by showtimeId or userId)
+curl -s "http://localhost:8080/api/admin/bookings?showtimeId=000000000000000000000002" \
+  -H "Authorization: Bearer $ADMIN" | jq .
+```
+
 ### Testing without a browser (DEV_AUTH)
 
 For concurrency / booking testing without a Google OAuth round-trip:

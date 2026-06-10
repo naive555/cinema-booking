@@ -6,6 +6,8 @@ import (
 	"cinema-booking/backend/internal/booking"
 	"cinema-booking/backend/internal/domain"
 	"cinema-booking/backend/internal/lock"
+	"cinema-booking/backend/internal/queue"
+	"cinema-booking/backend/internal/realtime"
 	"cinema-booking/backend/internal/seat"
 	"cinema-booking/backend/internal/seed"
 	"cinema-booking/backend/internal/showtime"
@@ -49,9 +51,27 @@ func main() {
 		seedCancel()
 	}
 
+	// Context that lives for the entire process lifetime; cancelled on shutdown
+	// to stop background goroutines (queue consumer, WS expiry watcher).
+	appCtx, appCancel := context.WithCancel(context.Background())
+
+	// ── realtime hub ──────────────────────────────────────────────────────────
+	wsHub := realtime.NewHub()
+	go wsHub.Run()
+	go wsHub.WatchLockExpiry(appCtx, rdb)
+
+	// ── queue client + async consumer ─────────────────────────────────────────
+	qClient := queue.New(rdb)
+	go qClient.StartConsumer(appCtx, "cinema-consumers", "consumer-1", func(ev queue.Event) error {
+		// Mock notification: log the event. Replace with email/push/webhook in production.
+		log.Printf("[notification] action=%s showtime=%s seat=%s user=%s bookingId=%s",
+			ev.Action, ev.ShowtimeID, ev.SeatID, ev.UserID, ev.BookingID)
+		return nil
+	})
+
 	lockClient      := lock.New(rdb)
 	authHandler     := auth.NewHandler(cfg, db)
-	bookingHandler  := booking.NewHandler(db, lockClient, cfg.LockTTL)
+	bookingHandler  := booking.NewHandler(db, lockClient, cfg.LockTTL, wsHub, qClient)
 	seatHandler     := seat.NewHandler(db, rdb)
 	showtimeHandler := showtime.NewHandler(db)
 
@@ -80,6 +100,9 @@ func main() {
 		api.POST("/showtimes/:showtimeId/seats/:seatId/select", bookingHandler.Select)
 		api.POST("/showtimes/:showtimeId/seats/:seatId/pay", bookingHandler.Pay)
 
+		// WebSocket — auth enforced by parent middleware via Authorization header
+		api.GET("/ws", wsHub.Handler)
+
 		// Admin sub-group — additionally requires role=ADMIN
 		admin := api.Group("/admin", auth.RequireRole(domain.RoleAdmin))
 		{
@@ -87,6 +110,7 @@ func main() {
 				claims, _ := auth.ClaimsFromContext(c)
 				c.JSON(http.StatusOK, gin.H{"status": "ok", "authed_as": claims.Email})
 			})
+			admin.GET("/bookings", bookingHandler.AdminListBookings)
 		}
 	}
 
@@ -106,6 +130,9 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("shutdown signal received")
+
+	// Stop background goroutines before draining HTTP.
+	appCancel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

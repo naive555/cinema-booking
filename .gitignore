@@ -1,4 +1,12 @@
+# Ignore environment variables and executables
 .env
+
 *.exe
 *.exe~
 /bin/
+
+# Ignore build artifacts
+/build/
+/dist/
+/target/
+cinema-booking-linux

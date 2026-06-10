@@ -52,8 +52,8 @@ Do not spend effort there.
 - External deps (Mongo, Redis) connected with retry/backoff on startup and a
   graceful shutdown.
 
-## Current phase: DAY 2 — CONCURRENCY CORE (65% of grading)
-DO: Redis lock acquire/release with Lua script, select-seat endpoint, mock
-payment -> booking write, concurrency test (prove no double-booking under
-concurrent requests). Audit logs may be written synchronously.
-DO NOT YET: WebSocket realtime push, async Redis Streams queue consumer.
+## Current phase: DAY 3 — REALTIME + ASYNC MQ + ADMIN
+DO: WebSocket hub with per-showtime rooms, broadcast on lock/book/release,
+Redis Streams MQ for async audit + mock notification, seat-release-on-timeout
+(Redis keyspace expiry events), admin bookings list with filter.
+DO NOT YET: full frontend integration, real payment gateway, email delivery.

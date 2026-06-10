@@ -2,12 +2,15 @@ package booking
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"time"
 
 	"cinema-booking/backend/internal/auth"
 	"cinema-booking/backend/internal/domain"
 	"cinema-booking/backend/internal/lock"
+	"cinema-booking/backend/internal/queue"
+	"cinema-booking/backend/internal/realtime"
 
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -19,10 +22,12 @@ type Handler struct {
 	db      *mongo.Database
 	locker  *lock.Client
 	lockTTL time.Duration
+	hub     *realtime.Hub
+	q       *queue.Client
 }
 
-func NewHandler(db *mongo.Database, lc *lock.Client, lockTTL time.Duration) *Handler {
-	return &Handler{db: db, locker: lc, lockTTL: lockTTL}
+func NewHandler(db *mongo.Database, lc *lock.Client, lockTTL time.Duration, hub *realtime.Hub, q *queue.Client) *Handler {
+	return &Handler{db: db, locker: lc, lockTTL: lockTTL, hub: hub, q: q}
 }
 
 type selectResp struct {
@@ -69,6 +74,22 @@ func (h *Handler) Select(c *gin.Context) {
 
 	h.writeAudit(ctx, "SEAT_LOCKED", claims, showtimeID, seatID, nil)
 
+	// Broadcast and publish are best-effort — never fail the HTTP request on their errors.
+	h.hub.Broadcast(showtimeHex, realtime.Event{
+		Type:   "SEAT_LOCKED",
+		SeatID: seatHex,
+		Status: string(domain.StatusLocked),
+		At:     time.Now(),
+	})
+	if err := h.q.Publish(ctx, queue.Event{
+		ShowtimeID: showtimeHex,
+		SeatID:     seatHex,
+		UserID:     claims.RegisteredClaims.Subject,
+		Action:     "SEAT_LOCKED",
+	}); err != nil {
+		log.Printf("booking: queue publish SEAT_LOCKED: %v", err)
+	}
+
 	c.JSON(http.StatusOK, selectResp{
 		OwnerToken: ownerToken,
 		ExpiresAt:  time.Now().Add(h.lockTTL),
@@ -110,7 +131,7 @@ func (h *Handler) Pay(c *gin.Context) {
 	}
 
 	// Write the booking. The unique index {showtimeId, seatId} is the hard guard
-	// against double-booking — it catches any race that slips past the lock.
+	// against double-booking — catches any race that slips past the lock.
 	userID, _ := bson.ObjectIDFromHex(claims.RegisteredClaims.Subject)
 	booking := domain.Booking{
 		ShowtimeID: showtimeID,
@@ -118,7 +139,7 @@ func (h *Handler) Pay(c *gin.Context) {
 		UserID:     userID,
 		CreatedAt:  time.Now(),
 	}
-	_, insertErr := h.db.Collection("bookings").InsertOne(ctx, booking)
+	res, insertErr := h.db.Collection("bookings").InsertOne(ctx, booking)
 	if insertErr != nil {
 		if mongo.IsDuplicateKeyError(insertErr) {
 			h.writeAudit(ctx, "BOOKING_DUPLICATE", claims, showtimeID, seatID, nil)
@@ -129,15 +150,37 @@ func (h *Handler) Pay(c *gin.Context) {
 		return
 	}
 
-	// Booking committed — release the lock. Non-fatal if the TTL already fired.
+	// Booking committed — release the lock. Non-fatal if TTL already fired.
 	h.locker.Release(ctx, key, req.OwnerToken) //nolint:errcheck
 
 	h.writeAudit(ctx, "BOOKING_SUCCESS", claims, showtimeID, seatID, nil)
+
+	bookingID := ""
+	if oid, ok := res.InsertedID.(bson.ObjectID); ok {
+		bookingID = oid.Hex()
+	}
+
+	h.hub.Broadcast(showtimeHex, realtime.Event{
+		Type:   "SEAT_BOOKED",
+		SeatID: seatHex,
+		Status: string(domain.StatusBooked),
+		At:     time.Now(),
+	})
+	if err := h.q.Publish(ctx, queue.Event{
+		BookingID:  bookingID,
+		ShowtimeID: showtimeHex,
+		SeatID:     seatHex,
+		UserID:     claims.RegisteredClaims.Subject,
+		Action:     "SEAT_BOOKED",
+	}); err != nil {
+		log.Printf("booking: queue publish SEAT_BOOKED: %v", err)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":     "booked",
 		"showtimeId": showtimeHex,
 		"seatId":     seatHex,
+		"bookingId":  bookingID,
 	})
 }
 
