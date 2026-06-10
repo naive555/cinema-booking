@@ -240,6 +240,38 @@ SEED_ON_START=true docker compose up -d --force-recreate backend
 # Seeds 2 showtimes (Inception, Interstellar) and 80 seats (rows A-E × 1-8)
 ```
 
+### Concurrency proof
+
+```bash
+# Stack must be running with DEV_AUTH=true (see above)
+make test-concurrency
+```
+
+Output (recorded against the live stack):
+
+```
+=== RUN   TestConcurrentSelectPay
+    concurrency_test.go:147: target seat: 6a27f28742ab1a2c54291438 (row A, seat 1) — showtime 000000000000000000000002
+    concurrency_test.go:186: ━━━ Scenario 1: concurrent select+pay ━━━
+    concurrency_test.go:187:   goroutines  = 50
+    concurrency_test.go:188:   successes   = 1  <- must be 1
+    concurrency_test.go:189:   conflicts   = 49  <- must be 49
+    concurrency_test.go:190:   seat status = BOOKED  <- must be BOOKED
+--- PASS: TestConcurrentSelectPay (0.35s)
+=== RUN   TestConcurrentSelectOnly
+    concurrency_test.go:214: target seat: 6a27f28742ab1a2c5429143a (row A, seat 2) — showtime 000000000000000000000002
+    concurrency_test.go:246: ━━━ Scenario 2: concurrent select-only ━━━
+    concurrency_test.go:247:   goroutines  = 50
+    concurrency_test.go:248:   acquired    = 1  <- must be 1
+    concurrency_test.go:249:   rejected    = 49  <- must be 49
+    concurrency_test.go:250:   seat status = LOCKED  <- must be LOCKED (unpaid hold)
+--- PASS: TestConcurrentSelectOnly (0.22s)
+PASS
+ok  	cinema-booking/backend/test	2.544s
+```
+
+50 goroutines race simultaneously for the same seat. Exactly 1 wins; 49 receive a conflict. Zero double bookings.
+
 ### Testing without a browser (DEV_AUTH)
 
 For concurrency / booking testing without a Google OAuth round-trip:
