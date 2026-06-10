@@ -1,0 +1,341 @@
+{
+  "info": {
+    "name": "Cinema Booking",
+    "_postman_id": "cinema-booking-v1",
+    "description": "Happy-path walkthrough + admin filters.\n\nQuick start:\n1. Run `docker compose up --build` with DEV_AUTH=true, SEED_ON_START=true.\n2. Send **Dev Login** — the token is stored automatically in {{token}}.\n3. Run the remaining requests in order.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url",    "value": "http://localhost:8080",           "type": "string" },
+    { "key": "token",       "value": "",                                "type": "string",
+      "description": "Set automatically by the Dev Login test script." },
+    { "key": "admin_token", "value": "",                                "type": "string",
+      "description": "Set automatically by the Dev Admin Login test script." },
+    { "key": "showtime_id", "value": "000000000000000000000001",        "type": "string" },
+    { "key": "seat_id",     "value": "",                                "type": "string",
+      "description": "Set automatically by Select Seat." },
+    { "key": "owner_token", "value": "",                                "type": "string",
+      "description": "Set automatically by Select Seat." }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Dev Login (USER)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.collectionVariables.set('token', json.token);",
+                  "pm.test('Got token', () => pm.expect(json.token).to.be.a('string'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"demo@example.com\",\n  \"role\": \"USER\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/dev/token", "host": ["{{base_url}}"], "path": ["dev", "token"] },
+            "description": "Mint a USER JWT without an OAuth round-trip. Requires DEV_AUTH=true."
+          }
+        },
+        {
+          "name": "Dev Login (ADMIN)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.collectionVariables.set('admin_token', json.token);",
+                  "pm.test('Got admin token', () => pm.expect(json.token).to.be.a('string'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"admin@example.com\",\n  \"role\": \"ADMIN\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/dev/token", "host": ["{{base_url}}"], "path": ["dev", "token"] },
+            "description": "Mint an ADMIN JWT. Required for the admin endpoints."
+          }
+        },
+        {
+          "name": "Me (whoami)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": { "raw": "{{base_url}}/api/me", "host": ["{{base_url}}"], "path": ["api", "me"] },
+            "description": "Returns the identity encoded in the current JWT."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Showtimes & Seats",
+      "item": [
+        {
+          "name": "List Showtimes",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Has showtimes', () => pm.expect(json.showtimes).to.be.an('array').with.length.greaterThan(0));",
+                  "// Pin the first showtime so later requests use a real ID.",
+                  "if (json.showtimes && json.showtimes.length) {",
+                  "  pm.collectionVariables.set('showtime_id', json.showtimes[0].id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": { "raw": "{{base_url}}/api/showtimes", "host": ["{{base_url}}"], "path": ["api", "showtimes"] }
+          }
+        },
+        {
+          "name": "Seat Map",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Has seats', () => pm.expect(json.seats).to.be.an('array').with.length.greaterThan(0));",
+                  "// Pick the first AVAILABLE seat for the Select request.",
+                  "var avail = (json.seats || []).find(s => s.status === 'AVAILABLE');",
+                  "if (avail) pm.collectionVariables.set('seat_id', avail.id);",
+                  "pm.test('At least one AVAILABLE seat', () => pm.expect(avail).to.exist);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/showtimes/{{showtime_id}}/seats",
+              "host": ["{{base_url}}"],
+              "path": ["api", "showtimes", "{{showtime_id}}", "seats"]
+            },
+            "description": "Returns all seats with AVAILABLE / LOCKED / BOOKED status.\nStatus is computed at read time: BOOKED = Mongo doc; LOCKED = Redis key; AVAILABLE = neither."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Booking Flow",
+      "item": [
+        {
+          "name": "Select Seat (acquire lock)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has ownerToken', () => pm.expect(json.ownerToken).to.be.a('string'));",
+                  "pm.test('Has expiresAt', () => pm.expect(json.expiresAt).to.be.a('string'));",
+                  "pm.collectionVariables.set('owner_token', json.ownerToken);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/showtimes/{{showtime_id}}/seats/{{seat_id}}/select",
+              "host": ["{{base_url}}"],
+              "path": ["api", "showtimes", "{{showtime_id}}", "seats", "{{seat_id}}", "select"]
+            },
+            "description": "Acquires a Redis SET NX EX lock on the seat.\nReturns { ownerToken, expiresAt }. ownerToken must be echoed back in Pay.\n409 if another client already holds the lock."
+          }
+        },
+        {
+          "name": "Pay (confirm booking)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "var json = pm.response.json();",
+                  "pm.test('Status booked', () => pm.expect(json.status).to.eql('booked'));",
+                  "pm.test('Has bookingId', () => pm.expect(json.bookingId).to.be.a('string'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization",  "value": "Bearer {{token}}" },
+              { "key": "Content-Type",   "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"ownerToken\": \"{{owner_token}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/showtimes/{{showtime_id}}/seats/{{seat_id}}/pay",
+              "host": ["{{base_url}}"],
+              "path": ["api", "showtimes", "{{showtime_id}}", "seats", "{{seat_id}}", "pay"]
+            },
+            "description": "Confirms the booking. Verifies ownerToken via atomic Lua script, then inserts a Booking document.\n410 if hold expired; 409 if already booked (unique-index guard)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin",
+      "item": [
+        {
+          "name": "Admin — List Bookings",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "var json = pm.response.json();",
+                  "pm.test('Has bookings array', () => pm.expect(json.bookings).to.be.an('array'));",
+                  "pm.test('Has total', () => pm.expect(json.total).to.be.a('number'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{admin_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/admin/bookings?page=1&limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "bookings"],
+              "query": [
+                { "key": "page",  "value": "1" },
+                { "key": "limit", "value": "20" },
+                { "key": "movieTitle", "value": "", "disabled": true,
+                  "description": "Case-insensitive substring match on showtime.movieTitle" },
+                { "key": "date", "value": "", "disabled": true,
+                  "description": "YYYY-MM-DD — showtimes whose startTime falls on this date" },
+                { "key": "userId", "value": "", "disabled": true,
+                  "description": "Exact Mongo ObjectID hex of the booking user" },
+                { "key": "showtimeId", "value": "", "disabled": true,
+                  "description": "Exact Mongo ObjectID hex of the showtime" }
+              ]
+            },
+            "description": "Paginated booking list with optional filters. Requires ADMIN token. Enable the disabled query params to filter."
+          }
+        },
+        {
+          "name": "Admin — List Bookings (filter by movie)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "var json = pm.response.json();",
+                  "pm.test('Results narrowed', () => {",
+                  "  console.log('Inception bookings total:', json.total);",
+                  "  pm.expect(json.bookings).to.be.an('array');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{admin_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/admin/bookings?movieTitle=Inception",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "bookings"],
+              "query": [{ "key": "movieTitle", "value": "Inception" }]
+            },
+            "description": "Shows only bookings for showtimes whose title contains 'Inception'."
+          }
+        },
+        {
+          "name": "Admin — List Audit Logs",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "var json = pm.response.json();",
+                  "pm.test('Has logs array', () => pm.expect(json.logs).to.be.an('array'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{admin_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/admin/audit-logs?limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "audit-logs"],
+              "query": [
+                { "key": "limit", "value": "20" },
+                { "key": "action", "value": "BOOKING_SUCCESS", "disabled": true,
+                  "description": "Filter by action: SEAT_LOCKED | BOOKING_SUCCESS | SEAT_RELEASED | BOOKING_TIMEOUT | LOCK_FAIL | BOOKING_DUPLICATE" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Admin — 403 with USER token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('USER token gets 403', () => pm.response.to.have.status(403));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/admin/bookings",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "bookings"]
+            },
+            "description": "Proves that a USER-role JWT cannot reach admin endpoints."
+          }
+        }
+      ]
+    }
+  ]
+}
