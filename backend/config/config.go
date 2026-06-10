@@ -36,6 +36,9 @@ type Config struct {
 	// Authorization
 	AdminEmails []string // ADMIN_EMAILS — comma-separated list of admin addresses
 
+	// Frontend
+	FrontendURL string // FRONTEND_URL — SPA origin; OAuth callback redirects here
+
 	// Seat locking
 	LockTTL time.Duration // LOCK_TTL_SECONDS — how long a seat hold lasts
 
@@ -75,6 +78,7 @@ func Load() (*Config, error) {
 		GoogleClientID:     required("GOOGLE_CLIENT_ID"),
 		GoogleClientSecret: required("GOOGLE_CLIENT_SECRET"),
 		GoogleRedirectURL:  required("GOOGLE_REDIRECT_URL"),
+		FrontendURL:        optional("FRONTEND_URL", "http://localhost"),
 	}
 
 	// ADMIN_EMAILS — comma-separated

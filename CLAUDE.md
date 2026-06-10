@@ -52,8 +52,9 @@ Do not spend effort there.
 - External deps (Mongo, Redis) connected with retry/backoff on startup and a
   graceful shutdown.
 
-## Current phase: DAY 3 — REALTIME + ASYNC MQ + ADMIN
-DO: WebSocket hub with per-showtime rooms, broadcast on lock/book/release,
-Redis Streams MQ for async audit + mock notification, seat-release-on-timeout
-(Redis keyspace expiry events), admin bookings list with filter.
-DO NOT YET: full frontend integration, real payment gateway, email delivery.
+## Current phase: DAY 4 — FRONTEND
+DO: Vue 3 + Vite SPA in frontend/; Pinia auth store; Google OAuth + dev-login;
+axios wrapper with Bearer token; realtime seat map with WS; select+countdown+pay;
+admin bookings + audit-log views; nginx serving built static files with
+/api, /auth/google/, /ws proxied to backend.
+DO NOT YET: real payment gateway, email delivery.

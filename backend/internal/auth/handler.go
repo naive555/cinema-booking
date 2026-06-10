@@ -99,7 +99,9 @@ func (h *Handler) Callback(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token mint failed"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"token": tokenStr})
+	// Redirect to the SPA callback route so it can store the token.
+	// FRONTEND_URL defaults to http://localhost (nginx on port 80).
+	c.Redirect(http.StatusFound, h.cfg.FrontendURL+"/auth/callback?token="+tokenStr)
 }
 
 // Me returns the authenticated caller's identity from the JWT claims.

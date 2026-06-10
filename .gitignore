@@ -1,6 +1,9 @@
 # Ignore environment variables and executables
 .env
 
+# Ignore node modules
+node_modules/
+
 *.exe
 *.exe~
 /bin/

@@ -50,12 +50,26 @@ services:
       LOCK_TTL_SECONDS: ${LOCK_TTL_SECONDS:-15}
       SEED_ON_START:    ${SEED_ON_START:-false}
       DEV_AUTH:         ${DEV_AUTH:-false}
+      # After OAuth the backend redirects to FRONTEND_URL/auth/callback?token=<jwt>
+      FRONTEND_URL:     ${FRONTEND_URL:-http://localhost}
       # secrets: read from .env
       JWT_SECRET:           ${JWT_SECRET}
       GOOGLE_CLIENT_ID:     ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
       GOOGLE_REDIRECT_URL:  ${GOOGLE_REDIRECT_URL:-http://localhost:8080/auth/google/callback}
       ADMIN_EMAILS:         ${ADMIN_EMAILS:-admin@example.com}
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Pass DEV_AUTH through so the dev-login form is compiled in when needed.
+        VITE_DEV_AUTH: ${DEV_AUTH:-false}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
 
 volumes:
   mongo_data:
