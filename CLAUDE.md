@@ -52,7 +52,8 @@ Do not spend effort there.
 - External deps (Mongo, Redis) connected with retry/backoff on startup and a
   graceful shutdown.
 
-## Current phase: DAY 1 — AUTH + SEAT-MAP READ PATH
-DO: Google OAuth login/callback, JWT minting with a role claim, auth middleware,
-role middleware, GET seat map (merge Mongo booked + Redis locked).
-DO NOT YET: the Redis lock, booking writes, payment, WebSocket, queue consumer.
+## Current phase: DAY 2 — CONCURRENCY CORE (65% of grading)
+DO: Redis lock acquire/release with Lua script, select-seat endpoint, mock
+payment -> booking write, concurrency test (prove no double-booking under
+concurrent requests). Audit logs may be written synchronously.
+DO NOT YET: WebSocket realtime push, async Redis Streams queue consumer.
