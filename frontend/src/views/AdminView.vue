@@ -27,9 +27,21 @@
       <tbody>
         <tr v-for="b in bookings" :key="b.id" style="border-top:1px solid #eee">
           <td style="padding:8px 12px;font-family:monospace;font-size:0.9em">{{ b.id.slice(-8) }}</td>
-          <td style="padding:8px 12px;font-family:monospace">{{ b.showtimeId.slice(-8) }}</td>
+          <td style="padding:8px 12px">
+            <span style="font-weight:500">{{ showtimeMap[b.showtimeId] ?? '—' }}</span>
+            <span style="display:block;font-family:monospace;font-size:0.78em;color:#999">{{ b.showtimeId.slice(-8) }}</span>
+          </td>
           <td style="padding:8px 12px;font-family:monospace">{{ b.seatId.slice(-8) }}</td>
-          <td style="padding:8px 12px;font-family:monospace">{{ b.userId.slice(-8) }}</td>
+          <td style="padding:8px 12px">
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-family:monospace;font-size:0.82em;color:#333">{{ b.userId }}</span>
+              <button
+                @click="copyText(b.userId)"
+                :title="copied === b.userId ? 'Copied!' : 'Copy ID'"
+                style="flex-shrink:0;padding:2px 6px;font-size:0.75em;border:1px solid #ccc;border-radius:3px;background:#f5f5f5;cursor:pointer;color:#555"
+              >{{ copied === b.userId ? '✓' : 'copy' }}</button>
+            </div>
+          </td>
           <td style="padding:8px 12px;color:#666">{{ fmt(b.createdAt) }}</td>
         </tr>
       </tbody>
@@ -80,24 +92,35 @@
 import { ref, onMounted } from 'vue'
 import api from '../lib/api'
 
-const bHeaders = ['Booking ID', 'Showtime', 'Seat', 'User', 'Booked At']
+const bHeaders = ['Booking ID', 'Movie / Showtime', 'Seat', 'User', 'Booked At']
 const aHeaders = ['Action', 'Showtime', 'Seat', 'Meta', 'At']
 const auditActions = ['SEAT_LOCKED', 'BOOKING_SUCCESS', 'SEAT_RELEASED', 'BOOKING_TIMEOUT', 'LOCK_FAIL', 'BOOKING_DUPLICATE']
 
 // Bookings
-const bookings   = ref([])
-const total      = ref(0)
-const page       = ref(1)
-const totalPages = ref(1)
-const bLoading   = ref(false)
-const bError     = ref('')
-const f          = ref({ movieTitle: '', date: '', userId: '' })
+const bookings      = ref([])
+const total         = ref(0)
+const page          = ref(1)
+const totalPages    = ref(1)
+const bLoading      = ref(false)
+const bError        = ref('')
+const f             = ref({ movieTitle: '', date: '', userId: '' })
+const showtimeMap   = ref({})  // showtimeId → movieTitle, loaded once on mount
+const copied        = ref('')  // tracks which userId was last copied (for ✓ feedback)
 
 // Audit
 const auditLogs   = ref([])
 const auditTotal  = ref(0)
 const aLoading    = ref(false)
 const auditAction = ref('')
+
+let copiedTimer = null
+function copyText(text) {
+  navigator.clipboard.writeText(text).then(() => {
+    copied.value = text
+    clearTimeout(copiedTimer)
+    copiedTimer = setTimeout(() => { copied.value = '' }, 1500)
+  })
+}
 
 async function search() {
   page.value = 1
@@ -149,7 +172,14 @@ function fmt(iso) {
   return new Date(iso).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
 }
 
-onMounted(() => {
+onMounted(async () => {
+  // Load showtime titles once; used to enrich the bookings table
+  try {
+    const { data } = await api.get('/showtimes')
+    const map = {}
+    for (const st of data.showtimes ?? []) map[st.id] = st.movieTitle
+    showtimeMap.value = map
+  } catch {}
   load()
   loadAudit()
 })
