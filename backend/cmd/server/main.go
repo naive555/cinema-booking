@@ -146,6 +146,7 @@ func main() {
 				c.JSON(http.StatusOK, gin.H{"status": "ok", "authed_as": claims.Email})
 			})
 			admin.GET("/bookings", bookingHandler.AdminListBookings)
+			admin.GET("/audit-logs", bookingHandler.AdminListAuditLogs)
 		}
 	}
 

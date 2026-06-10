@@ -67,6 +67,28 @@ var requiredIndexes = []indexDef{
 			Options: options.Index().SetUnique(true).SetName("uq_user_email"),
 		},
 	},
+	// ── audit_logs ────────────────────────────────────────────────────────────
+	{
+		"audit_logs",
+		mongo.IndexModel{
+			Keys:    bson.D{{Key: "action", Value: 1}, {Key: "createdAt", Value: -1}},
+			Options: options.Index().SetName("idx_audit_action_time"),
+		},
+	},
+	{
+		"audit_logs",
+		mongo.IndexModel{
+			Keys:    bson.D{{Key: "showtimeId", Value: 1}, {Key: "createdAt", Value: -1}},
+			Options: options.Index().SetName("idx_audit_showtime_time"),
+		},
+	},
+	{
+		"audit_logs",
+		mongo.IndexModel{
+			Keys:    bson.D{{Key: "userId", Value: 1}, {Key: "createdAt", Value: -1}},
+			Options: options.Index().SetName("idx_audit_user_time"),
+		},
+	},
 }
 
 // EnsureIndexes creates all required indexes, logging each result.
