@@ -52,9 +52,8 @@ Do not spend effort there.
 - External deps (Mongo, Redis) connected with retry/backoff on startup and a
   graceful shutdown.
 
-## Current phase: DAY 4 — FRONTEND
-DO: Vue 3 + Vite SPA in frontend/; Pinia auth store; Google OAuth + dev-login;
-axios wrapper with Bearer token; realtime seat map with WS; select+countdown+pay;
-admin bookings + audit-log views; nginx serving built static files with
-/api, /auth/google/, /ws proxied to backend.
-DO NOT YET: real payment gateway, email delivery.
+## Current phase: DAY 5 — POLISH + DOCS + SUBMISSION
+DO: tighten README (run guide, concurrency callout, booking-flow narrative);
+admin view improvements (movie title lookup, copy-ID button); final acceptance
+testing; commit and submit.
+DO NOT: real payment gateway, email delivery — explicitly out of scope.

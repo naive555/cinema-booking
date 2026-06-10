@@ -9,45 +9,45 @@ Multiple users racing for the same seat will never produce a double booking.
 
 ```mermaid
 flowchart TD
-    Browser["Browser / Vue 3\n(served by nginx)"]
+    Browser["Browser / Vue 3\n(served by nginx :80)"]
 
-    subgraph Backend ["Go / Gin Backend"]
+    subgraph Backend ["Go / Gin Backend :8080"]
         Auth["Auth Handler\nGoogle OAuth -> JWT"]
-        BookingH["Booking Handler"]
-        SeatH["Seat Handler"]
-        WS["WebSocket Hub"]
-        Consumer["Queue Consumer\n(Redis Streams)"]
+        BookingH["Booking Handler\nselect · pay"]
+        SeatH["Seat Handler\nseat map read"]
+        WS["WebSocket Hub\nrealtime push"]
+        Consumer["Queue Consumer\nRedis Streams"]
     end
 
     subgraph Persistence
-        Mongo[("MongoDB\nbookings · seats\nshowtimes · users")]
-        Redis[("Redis\nSeat Locks  SET NX EX\nAudit Stream  XADD")]
+        Mongo[("MongoDB\nbookings · seats\nshowtimes · users · audit_logs")]
+        Redis[("Redis\nSeat locks  SET NX EX\nAudit stream  XADD\nKeyspace notifications")]
     end
 
     Browser -->|"REST  /api/..."| BookingH
     Browser -->|"REST  /api/..."| SeatH
     Browser -->|"OAuth redirect"| Auth
-    Browser <-->|"WebSocket  /ws"| WS
+    Browser <-->|"WebSocket  /api/ws?token=..."| WS
 
     Auth -->|"upsert user"| Mongo
     BookingH -->|"SET NX EX  acquire"| Redis
     BookingH -->|"insert booking"| Mongo
     BookingH -->|"Lua DEL  release"| Redis
-    BookingH -->|"XADD booking.events"| Redis
+    BookingH -->|"XADD events:booking"| Redis
     SeatH -->|"read bookings"| Mongo
-    SeatH -->|"KEYS seat:lock:*"| Redis
+    SeatH -->|"MGET seat:lock:*"| Redis
 
     Consumer -->|"XREADGROUP"| Redis
-    Consumer -->|"insert audit log"| Mongo
+    Consumer -->|"insert audit_log"| Mongo
     Consumer -->|"broadcast"| WS
     WS -->|"seat-map push"| Browser
 ```
 
-**Request path for a booking (happy path):**
+**Happy-path request flow:**
 `Browser -> BookingH -> Redis lock (NX) -> Mongo insert -> Redis stream -> release lock -> 200`
 
-**Realtime path:**
-`Queue Consumer reads stream -> writes AuditLog -> broadcasts via WS Hub -> Browser updates seat map`
+**Realtime flow:**
+`Queue Consumer reads stream -> writes AuditLog -> broadcasts via WS Hub -> all connected browsers update seat map`
 
 ---
 
@@ -55,104 +55,129 @@ flowchart TD
 
 | Layer | Choice | Why |
 |-------|--------|-----|
-| Backend | Go 1.26 + Gin | Low-overhead goroutines map cleanly onto per-request lock/wait semantics; Gin adds routing without magic |
-| Database | MongoDB 7 | Flexible schema for seat/showtime documents; atomic `findAndModify` available as a fallback; driver v2 |
-| Cache / Lock | Redis 7 | Atomic `SET NX EX` for distributed locks; Streams for durable async queue — one infra component does both |
+| Backend | Go 1.26 + Gin | Goroutines map cleanly onto per-request lock/wait semantics; Gin adds routing without magic |
+| Database | MongoDB 7 | Flexible schema; compound unique index is the last-resort double-booking guard |
+| Cache / Lock | Redis 7 | Atomic `SET NX EX` for distributed locks; Streams for durable async queue — one infra component, two roles |
 | Realtime | WebSocket (Gin upgrade) | Push seat-map deltas to all connected clients without polling |
-| Queue | Redis Streams | See Section 5 |
-| Auth | Google OAuth 2.0 -> backend JWT | Delegates credential management to Google; backend mints its own JWT so we control the role claim |
-| Frontend | Vue 3 (pre-built, served by nginx) | Out of scope for this assessment |
-| Deploy | Docker + docker-compose | Single `docker compose up --build` brings the full stack; no external dependencies |
+| Queue | Redis Streams | Durable, consumer groups, at-least-once delivery — see §5 |
+| Auth | Google OAuth 2.0 -> backend JWT | Delegates credential management to Google; backend mints its own JWT so we fully control the role claim |
+| Frontend | Vue 3 + Vite (nginx) | SPA with Pinia auth store, realtime seat map, select/pay flow, admin dashboard |
+| Deploy | Docker + docker-compose | Single `docker compose up --build`; no external runtime dependencies |
 
 ---
 
 ## 3. Booking Flow
 
-### Auth flow (implemented)
+### Step-by-step (happy path)
+
+```
+1.  GET  /api/showtimes
+        -> list available showtimes
+
+2.  GET  /api/showtimes/:id/seats
+        -> seat grid: each seat is AVAILABLE | LOCKED | BOOKED
+          (merged at read time from Mongo bookings + Redis lock keys)
+
+3.  POST /api/showtimes/:id/seats/:seatId/select
+        -> SET seat:lock:{showtimeId}:{seatId} <ownerToken> NX EX <LOCK_TTL_SECONDS>
+        -> 409 if another client already holds the lock
+        -> returns { ownerToken, expiresAt }
+        -> SEAT_LOCKED WS event pushed to all connected clients
+
+4.  [countdown] client holds the seat for up to LOCK_TTL_SECONDS (default 300 s)
+
+5.  POST /api/showtimes/:id/seats/:seatId/pay   { ownerToken }
+        -> Lua script: GET key -> compare -> DEL (atomic owner check)
+        -> 410 if lock expired; 409 if already booked
+        -> db.bookings.insertOne({ showtimeId, seatId, userId })
+          unique index fires -> 409 on any duplicate (last safety net)
+        -> releases lock
+        -> SEAT_BOOKED WS event pushed to all clients
+        -> BOOKING_SUCCESS published to Redis Stream for async audit
+```
+
+### No-pay path (timeout)
+
+```
+        lock TTL fires (Redis auto-deletes key)
+        -> keyspace notification received by backend
+        -> SEAT_RELEASED WS event pushed to all clients
+        -> seat returns to AVAILABLE on all connected browsers
+```
+
+### Auth flow
 
 ```
 Browser                  Backend                 Google
-  |                         |                      |
-  |-- GET /auth/google/login|                      |
-  |                         |-- redirect --------->|
-  |<------- 302 to consent--|                      |
-  |                         |                      |
-  |<-- GET /auth/google/callback?code=...&state=...|
-  |                         |-- exchange code ----->|
-  |                         |<-- access token ------|
-  |                         |-- GET /userinfo ------>|
-  |                         |<-- {email, name} ------|
-  |                         |                      |
-  |                         | upsert users (Mongo)
-  |                         | resolve role (ADMIN_EMAILS)
-  |                         | mint JWT (HS256)
-  |<-- 200 {"token":"..."} -|
+  |-- GET /auth/google/login --|                      |
+  |                            |-- 302 to consent --> |
+  |<-- 302 (via Google) -------|                      |
+  |                            |                      |
+  | GET /auth/google/callback?code=...               |
+  |                            |-- exchange code ---> |
+  |                            |<-- access token ---- |
+  |                            |-- GET /userinfo ----> |
+  |                            |<-- {email, name} ---- |
+  |                            |                      |
+  |                            | upsert user (Mongo)
+  |                            | assign role (ADMIN_EMAILS allowlist)
+  |                            | mint JWT HS256
+  |<-- 302 /auth/callback?token=<jwt> --------------|
 ```
 
-CSRF protection: a random 16-byte hex state is set as an `httpOnly` cookie before the redirect. On callback the query param is compared against the cookie and the cookie is immediately cleared.
+CSRF protection: a random 16-byte hex state is set as an `httpOnly` cookie before the redirect; compared on callback; immediately cleared.
 
 JWT payload:
 ```json
-{
-  "sub":   "<mongo ObjectID hex>",
-  "email": "user@example.com",
-  "role":  "USER",
-  "iat":   1234567890,
-  "exp":   1234567890
-}
+{ "sub": "<ObjectID>", "email": "user@example.com", "role": "USER", "iat": …, "exp": … }
 ```
 
-Subsequent requests must carry `Authorization: Bearer <token>`.
-
-### Seat map read (implemented)
-
-`GET /api/showtimes/:showtimeId/seats` — requires valid JWT. Returns all seats annotated with their status, derived at read time by merging two sources:
-
-| Status | Source |
-|--------|--------|
-| BOOKED | Booking document exists in MongoDB |
-| LOCKED | Redis key `seat:lock:{showtimeId}:{seatId}` exists |
-| AVAILABLE | Neither |
-
-Redis unavailability degrades gracefully to AVAILABLE (lock state is ephemeral; the Mongo unique index remains the hard safety net).
-
-### Booking write flow (implemented)
-
-```
-POST /api/showtimes/:showtimeId/seats/:seatId/select
-  1. Reject if seat already BOOKED in Mongo (CountDocuments).
-  2. SET NX EX  ->  acquire lock, receive ownerToken UUID.
-  3. 409 if another holder already owns the lock.
-  4. Return {ownerToken, expiresAt}.  Write SEAT_LOCKED audit.
-
-POST /api/showtimes/:showtimeId/seats/:seatId/pay
-  body: {"ownerToken": "<uuid>"}
-  1. Lua GET+compare -> verify caller still owns lock (Owned / Expired / WrongOwner).
-  2. 410 "hold expired, reselect" if not Owned.  Write BOOKING_TIMEOUT or LOCK_FAIL audit.
-  3. InsertOne booking into Mongo.
-  4. Unique index {showtimeId, seatId} fires on duplicate -> 409.
-  5. Release lock (Lua DEL if owner matches — non-fatal if TTL already fired).
-  6. Return 200.  Write BOOKING_SUCCESS audit.
-```
-
-**ownerToken design choice:** `select` returns the raw UUID lock token to the client, which must echo it back in `pay`. This is explicit and simple for a take-home assessment — the token proves the client holds the current lock. The alternative (storing the token server-side in a session or short-lived JWT) would add complexity without improving the correctness guarantee, which lives in the Lua ownership check and the Mongo unique index regardless.
+All `/api/*` endpoints require `Authorization: Bearer <token>`.  
+WebSocket upgrade passes the token as `?token=<jwt>` (browser WS API cannot send custom headers).
 
 ---
 
-## 4. Redis Lock Strategy
+## 4. Concurrency Correctness
 
-### Mechanism
+Three independent layers prevent double booking:
+
+| Layer | Mechanism | What it prevents |
+|-------|-----------|-----------------|
+| 1 | Redis `SET NX EX` | Only one client acquires the lock; all others get 409 immediately |
+| 2 | Lua owner-check on release | A client can only release a lock it still owns; prevents a late DEL from deleting a lock re-acquired by another client after TTL expiry |
+| 3 | MongoDB unique index `{ showtimeId: 1, seatId: 1 }` | Even if both layers above have a latent bug, the second `insertOne` fails with duplicate-key -> 409; no data corruption |
+
+**Proven by the concurrency test (50 goroutines, single seat):**
 
 ```
-SET seat:lock:{showtimeId}:{seatId}  {ownerToken}  NX  EX {LOCK_TTL_SECONDS}
+=== RUN   TestConcurrentSelectPay
+    goroutines  = 50
+    successes   = 1   <- must be 1
+    conflicts   = 49  <- must be 49
+    seat status = BOOKED
+--- PASS: TestConcurrentSelectPay (0.35s)
+
+=== RUN   TestConcurrentSelectOnly
+    goroutines  = 50
+    acquired    = 1   <- must be 1
+    rejected    = 49  <- must be 49
+    seat status = LOCKED
+--- PASS: TestConcurrentSelectOnly (0.22s)
+
+ok  cinema-booking/backend/test  2.544s
 ```
 
-- **`NX`** — only sets if the key does not exist. Two concurrent requests can race; exactly one wins.
-- **`EX {ttl}`** — key auto-expires, so a crashed client never leaves a seat locked forever. TTL is configurable via `LOCK_TTL_SECONDS` (default 300 s; set to 30 s for the demo so timeout behaviour is observable in real time).
-- **`ownerToken`** — a UUID generated fresh per lock attempt, stored as the key's value.
+### Redis Lock detail
 
-### Release: atomic Lua script
+```
+SET seat:lock:{showtimeId}:{seatId}  {ownerToken-UUID}  NX  EX {LOCK_TTL_SECONDS}
+```
 
+- **`NX`** — sets only if key does not exist; exactly one concurrent caller wins.
+- **`EX`** — auto-expires; a crashed client never leaves a seat permanently locked.
+- **`ownerToken`** — UUID generated fresh per attempt; echoed back by client in `pay`.
+
+**Release script (atomic Lua):**
 ```lua
 if redis.call("GET", KEYS[1]) == ARGV[1] then
     return redis.call("DEL", KEYS[1])
@@ -161,262 +186,174 @@ else
 end
 ```
 
-The check-then-delete is atomic at the Redis server. Without it, the following race is possible:
+Without atomicity, a slow client whose TTL already fired could `DEL` a key now owned by a different client. The Lua script makes check-then-delete a single Redis operation.
 
-1. Client A's lock expires (TTL hit).
-2. Client B acquires the same key.
-3. Client A's deferred `DEL` fires -> deletes Client B's lock -> seat appears free while B thinks it holds the lock.
-
-The Lua script ensures a client can only release a lock it still owns.
-
-### Why plain SET NX, not Redlock
-
-Redlock is designed for multi-node Redis deployments where clock drift and partial writes are real concerns. This system runs a **single Redis node**, so `SET NX EX` is both correct and sufficient. Redlock would add implementation complexity (multiple round-trips, quorum logic) with no correctness benefit here.
-
-### Final safety net: MongoDB unique index
-
-Even if lock logic has a latent bug, the compound unique index on `bookings { showtimeId: 1, seatId: 1 }` causes the second concurrent insert to fail with a duplicate-key error rather than silently succeed. The application catches this error and returns a conflict response. The lock prevents contention; the index prevents corruption.
+**Why not Redlock:** Redlock is for multi-node deployments where partial writes and clock drift are real. This system runs a single Redis node — `SET NX EX` is both correct and sufficient here.
 
 ---
 
 ## 5. Message Queue (Redis Streams)
 
-### What it does
+`POST .../pay` publishes a `BOOKING_SUCCESS` event to stream `events:booking` and returns 200 immediately. A background consumer goroutine reads the stream via `XREADGROUP` and:
 
-`POST .../pay` does **not** write the audit log inline. Instead it publishes a `BOOKING_SUCCESS` event to the Redis Stream `events:booking` and returns 200 immediately. A background consumer goroutine reads the stream and:
+1. Writes a `BOOKING_SUCCESS` `AuditLog` to MongoDB (`meta.source = "stream-consumer"` proves the async path ran).
+2. Logs a mock notification: `NOTIFY: emailed <user> about booking <id>`.
+3. `XACK` only after both succeed; on failure the message stays in the PEL and is redelivered on restart.
 
-1. Writes a `BOOKING_SUCCESS` `AuditLog` document to MongoDB — the consumer is the **only** writer for this action, so the audit row is proof the async path ran.
-2. Logs a mock notification: `NOTIFY: emailed <user> about booking <id>` — replace with a real mailer in production.
-3. Sends `XACK` only after both steps succeed; on failure the message stays in the **PEL** (Pending Entry List) and will be redelivered on next consumer startup.
-
+**Recorded evidence (stream -> consumer -> audit log):**
 ```
-# Stream key
-XADD events:booking * event '{"action":"BOOKING_SUCCESS","bookingId":"...","userId":"...","userEmail":"...","showtimeId":"...","seatId":"..."}'
-
-# Consumer group
-XGROUP CREATE events:booking cinema-consumers $ MKSTREAM
-XREADGROUP GROUP cinema-consumers consumer-1 COUNT 10 BLOCK 2000 STREAMS events:booking >
-XACK events:booking cinema-consumers <message-id>
-```
-
-#### Async path — recorded evidence
-
-```
-# (1) Event in the stream (XRANGE events:booking - +)
+# Stream entry
 1781081403904-0
 event {"action":"BOOKING_SUCCESS","bookingId":"6a29253b9539d4af7c263a56",
        "showtimeId":"000000000000000000000001","seatId":"6a27f28742ab1a2c542913ea",
        "userId":"6a29253b9539d4af7c263a53","userEmail":"stream-user@test.com"}
 
-# (2) Consumer notification log
+# Consumer log line
 2026/06/10 08:50:03 NOTIFY: emailed stream-user@test.com about booking 6a29253b9539d4af7c263a56
-                    (showtime=000000000000000000000001 seat=6a27f28742ab1a2c542913ea)
 
-# (3) Audit-log row written BY THE CONSUMER (meta.source = "stream-consumer")
-{
-  _id:        ObjectId('6a29253b9539d4af7c263a57'),
-  action:     'BOOKING_SUCCESS',
-  userId:     ObjectId('6a29253b9539d4af7c263a53'),
-  showtimeId: ObjectId('000000000000000000000001'),
-  seatId:     ObjectId('6a27f28742ab1a2c542913ea'),
-  meta:       { bookingId: '6a29253b9539d4af7c263a56', source: 'stream-consumer' },
-  createdAt:  ISODate('2026-06-10T08:50:03.905Z')
-}
+# Audit document written by consumer
+{ action: "BOOKING_SUCCESS", meta: { source: "stream-consumer" }, createdAt: "2026-06-10T08:50:03.905Z" }
 ```
 
-### Why Redis Streams over Pub/Sub
+**Why Streams over Pub/Sub:** Pub/Sub loses messages if no subscriber is connected at publish time. An audit log that silently drops records on restart is unacceptable. Streams persist entries until explicitly trimmed; unACKed messages are redelivered.
 
-| Property | Pub/Sub | Streams |
-|----------|---------|---------|
-| Durability | No — messages lost if no subscriber connected | Yes — persist in the log until trimmed |
-| Consumer groups | No | Yes — multiple consumers, each message delivered once |
-| Replay / backfill | No | Yes — new consumers can read from any past offset |
-| At-least-once delivery | No | Yes — unACKed messages stay in the PEL for retry |
-
-Pub/Sub would work if the consumer were always running and we accepted lost events on restart. For an audit log that is a non-starter: a restart during a booking storm would silently drop records.
-
-### Why Streams over RabbitMQ
-
-RabbitMQ is the right choice in a polyglot microservice environment where teams own separate services. Here, Redis already exists for locking. Adding RabbitMQ means a third infra component, a longer `docker-compose.yml`, a separate Go AMQP client, and additional ops surface area. The Streams API gives consumer groups, durable delivery, and replay without any of that cost. For a single-service system this is the correct trade-off; revisit when (if) a separate notification service is carved out.
+**Why Streams over RabbitMQ:** Redis is already in the stack for locking. Adding RabbitMQ means a third infrastructure component, a separate Go AMQP client, and additional ops surface area for no correctness benefit at single-service scale.
 
 ---
 
-## 6. Running Locally
+## 6. How to Run
 
 ### Prerequisites
 
-Docker and Docker Compose. Nothing else.
+- Docker and Docker Compose (no other local dependencies required)
 
-### Steps
+### Step 1 — copy the env file
 
 ```bash
-# 1. Copy the example env file and fill in your Google OAuth credentials
 cp .env.example .env
-# Edit .env: set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, JWT_SECRET
+```
 
-# 2. Start everything
+### Step 2 — choose an auth mode
+
+#### Option A — DEV_AUTH (recommended for evaluators, no Google credentials needed)
+
+Edit `.env`:
+```ini
+DEV_AUTH=true
+JWT_SECRET=any-long-random-string
+SEED_ON_START=true
+# Leave GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET as placeholder values
+```
+
+With `DEV_AUTH=true` the backend exposes `POST /dev/token` which mints a JWT for any email/role you supply — no OAuth round-trip. The frontend dev-login form (email + role selector) is compiled in automatically.
+
+#### Option B — Google OAuth (full production-like flow)
+
+1. Open [Google Cloud Console -> APIs & Services -> Credentials](https://console.cloud.google.com/apis/credentials).
+2. Create an **OAuth 2.0 Client ID** (Web application).
+3. Add `http://localhost:8080/auth/google/callback` to **Authorised redirect URIs**.
+4. Copy the **Client ID** and **Client secret** into `.env`:
+
+```ini
+GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=<your-client-secret>
+GOOGLE_REDIRECT_URL=http://localhost:8080/auth/google/callback
+JWT_SECRET=any-long-random-string
+SEED_ON_START=true
+DEV_AUTH=false
+```
+
+### Step 3 — start everything
+
+```bash
 docker compose up --build
-
-# 3. Verify
-curl http://localhost:8080/healthz
-# {"mongo":"ok","redis":"ok","status":"ok"}
 ```
 
-The Google OAuth consent screen requires a registered redirect URI. In Google Cloud Console, add `http://localhost:8080/auth/google/callback` as an authorised redirect URI for your OAuth 2.0 client.
+First run pulls base images and compiles the Go binary (~5 min on Docker Desktop).
+Subsequent runs use the layer cache and start in seconds.
 
-### Seeding demo data
+### Step 4 — open the app
+
+| URL | What |
+|-----|------|
+| `http://localhost` | Vue 3 SPA (login -> showtimes -> seat map -> admin) |
+| `http://localhost:8080/healthz` | `{"mongo":"ok","redis":"ok","status":"ok"}` |
+| `http://localhost:8080/api/showtimes` | raw API (requires Bearer token) |
+
+### Step 5 — make yourself an admin
+
+In `.env`, set:
+```ini
+ADMIN_EMAILS=your-email@example.com
+```
+
+Then restart the backend so it re-reads the env:
+```bash
+docker compose up -d --force-recreate backend
+```
+
+Log in with that email (OAuth or dev-login with that exact address). The JWT will carry `"role":"ADMIN"` and the **Admin** nav link will appear.
+
+### Running the concurrency test
+
+The stack must be running with `DEV_AUTH=true` and `SEED_ON_START=true`.
 
 ```bash
-SEED_ON_START=true docker compose up -d --force-recreate backend
-# Seeds 2 showtimes (Inception, Interstellar) and 80 seats (rows A-E × 1-8)
+# From the repo root
+cd backend
+go test ./test/ -v -count=1
 ```
 
-### Concurrency proof
-
-```bash
-# Stack must be running with DEV_AUTH=true (see above)
-make test-concurrency
-```
-
-Output (recorded against the live stack):
-
+Expected output:
 ```
 === RUN   TestConcurrentSelectPay
-    concurrency_test.go:147: target seat: 6a27f28742ab1a2c54291438 (row A, seat 1) — showtime 000000000000000000000002
-    concurrency_test.go:186: ━━━ Scenario 1: concurrent select+pay ━━━
-    concurrency_test.go:187:   goroutines  = 50
-    concurrency_test.go:188:   successes   = 1  <- must be 1
-    concurrency_test.go:189:   conflicts   = 49  <- must be 49
-    concurrency_test.go:190:   seat status = BOOKED  <- must be BOOKED
+    concurrency_test.go:188:   goroutines  = 50
+    concurrency_test.go:189:   successes   = 1  <- must be 1
+    concurrency_test.go:190:   conflicts   = 49 <- must be 49
+    concurrency_test.go:191:   seat status = BOOKED
 --- PASS: TestConcurrentSelectPay (0.35s)
 === RUN   TestConcurrentSelectOnly
-    concurrency_test.go:214: target seat: 6a27f28742ab1a2c5429143a (row A, seat 2) — showtime 000000000000000000000002
-    concurrency_test.go:246: ━━━ Scenario 2: concurrent select-only ━━━
-    concurrency_test.go:247:   goroutines  = 50
-    concurrency_test.go:248:   acquired    = 1  <- must be 1
-    concurrency_test.go:249:   rejected    = 49  <- must be 49
-    concurrency_test.go:250:   seat status = LOCKED  <- must be LOCKED (unpaid hold)
+    concurrency_test.go:248:   goroutines  = 50
+    concurrency_test.go:249:   acquired    = 1  <- must be 1
+    concurrency_test.go:250:   rejected    = 49 <- must be 49
+    concurrency_test.go:251:   seat status = LOCKED
 --- PASS: TestConcurrentSelectOnly (0.22s)
 PASS
-ok  	cinema-booking/backend/test	2.544s
+ok  cinema-booking/backend/test  2.544s
 ```
 
-50 goroutines race simultaneously for the same seat. Exactly 1 wins; 49 receive a conflict. Zero double bookings.
+The test points 50 goroutines at the same seat simultaneously. Exactly one wins; 49 receive a conflict. The seat is never double-booked.
 
-### WebSocket realtime demo
-
-Connect two clients to the same showtime, then trigger a seat select from a third user. Both observers receive the event simultaneously.
+### Minting tokens manually (DEV_AUTH=true)
 
 ```bash
-# Two observer terminals (requires websocat, or use the Python snippet below)
-TOKEN=$(curl -s -X POST http://localhost:8080/dev/token \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"alice@test.com","role":"USER"}' | jq -r .token)
-websocat -H "Authorization: Bearer $TOKEN" \
-  "ws://localhost:8080/api/ws?showtimeId=000000000000000000000001"
-```
-
-Recorded output (two clients, one select call):
-
-```
-=== WebSocket frames received ===
-Alice frame : {"type":"SEAT_LOCKED","seatId":"6a27f28742ab1a2c542913ea","status":"LOCKED","at":"2026-06-10T07:58:16.627Z"}
-Bob   frame : {"type":"SEAT_LOCKED","seatId":"6a27f28742ab1a2c542913ea","status":"LOCKED","at":"2026-06-10T07:58:16.627Z"}
-
-PASS -- both clients received SEAT_LOCKED for the correct seat
-```
-
-Event types pushed over WebSocket:
-
-| Event | Trigger |
-|-------|---------|
-| `SEAT_LOCKED` | `POST .../select` succeeds |
-| `SEAT_BOOKED` | `POST .../pay` succeeds |
-| `SEAT_RELEASED` | Redis lock TTL fires (key expiry via keyspace notification) |
-
-#### Seat-release-on-timeout — recorded timeline
-
-`LOCK_TTL_SECONDS=15`. Select a seat, do NOT pay, observe the WS client:
-
-```
-[T+  0.0s] seat 6a27f28742ab1a2c5429143a (A-2) status=AVAILABLE
-[T+  0.0s] WS observer connected
-[T+  0.0s] WS frame: {"type":"SEAT_LOCKED","seatId":"6a27f28742ab1a2c5429143a","status":"LOCKED","at":"..."}
-[T+  0.0s] POST select -> ownerToken=bae88060... expiresAt=2026-06-10T08:37:00Z
-[T+  0.0s] seat-map status=LOCKED
-[T+ 15.2s] WS frame: {"type":"SEAT_RELEASED","seatId":"6a27f28742ab1a2c5429143a","status":"AVAILABLE","at":"..."}
-[T+ 15.2s] seat-map status=AVAILABLE
-
-PASS: lock expired -> WS SEAT_RELEASED received -> seat-map AVAILABLE
-```
-
-#### Keyspace notifications — trade-off
-
-Redis keyspace notifications (`notify-keyspace-events Ex`) are **best-effort** (at-most-once):
-
-- A Redis restart or a heavily loaded server may miss some expired-key events.
-- A connected client that misses a `SEAT_RELEASED` frame will not know the seat is free until it refreshes.
-
-This is acceptable because the seat-map read path (`GET .../seats`) is the **source of truth**: it recomputes status from live Redis + Mongo on every call, so a missed WebSocket notification only delays a UI refresh — it never causes an incorrect booking. The Redis TTL still fires and the key is still deleted; only the notification is potentially lost, not the state change itself.
-
-### Admin endpoints
-
-```bash
-ADMIN=$(curl -s -X POST http://localhost:8080/dev/token \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"admin@cinema.com","role":"ADMIN"}' | jq -r .token)
-
-# List all bookings (optionally filter by showtimeId or userId)
-curl -s "http://localhost:8080/api/admin/bookings?showtimeId=000000000000000000000002" \
-  -H "Authorization: Bearer $ADMIN" | jq .
-```
-
-### Testing without a browser (DEV_AUTH)
-
-For concurrency / booking testing without a Google OAuth round-trip:
-
-```bash
-# Start with dev auth enabled
-DEV_AUTH=true docker compose up -d --force-recreate backend
-
-# Mint a USER token
+# USER token
 curl -s -X POST http://localhost:8080/dev/token \
   -H 'Content-Type: application/json' \
-  -d '{"email":"test@example.com","role":"USER"}' | jq .
+  -d '{"email":"alice@test.com","role":"USER"}' | jq -r .token
 
-# Mint an ADMIN token
+# ADMIN token
 curl -s -X POST http://localhost:8080/dev/token \
   -H 'Content-Type: application/json' \
-  -d '{"email":"admin@example.com","role":"ADMIN"}' | jq .
-
-# Use the token
-curl -s http://localhost:8080/api/showtimes/000000000000000000000001/seats \
-  -H 'Authorization: Bearer <token>' | jq .
+  -d '{"email":"admin@test.com","role":"ADMIN"}' | jq -r .token
 ```
 
-`DEV_AUTH` is **never enabled in production** — the endpoint is not registered unless the flag is `true`.
+`DEV_AUTH` is never enabled unless explicitly set to `true` — the endpoint is not registered otherwise.
 
 ---
 
 ## 7. Assumptions & Trade-offs
 
-**Single Redis node**
-Accepted. A multi-node cluster would require Redlock or a different locking scheme. At interview scale, single-node Redis with `SET NX EX` is correct and simpler to reason about.
+**Single Redis node** — accepted. A multi-node cluster would require Redlock or a different scheme. At single-node scale, `SET NX EX` is correct and simpler to reason about.
 
-**Seat status is computed, not stored**
-`BOOKED` is a durable MongoDB document. `LOCKED` is an ephemeral Redis key. `AVAILABLE` means neither exists. There is no `status` field on the Seat document. This avoids a write-ahead cache-invalidation problem: if we cached status in Mongo, a lock expiry would require a Mongo update, which adds a write and a potential consistency gap. The merge-at-read approach is always consistent at the cost of two reads per seat map fetch.
+**Seat status is computed, not stored** — `BOOKED` is a durable Mongo document; `LOCKED` is an ephemeral Redis key; `AVAILABLE` means neither. No `status` field on the Seat document. This avoids a cache-invalidation problem: if status were cached in Mongo, a lock expiry would require a Mongo write to keep them consistent. Merge-at-read is always consistent at the cost of two reads per seat map fetch.
 
-**Lock TTL determines maximum hold time**
-If a user acquires a lock and then closes the tab, the seat is released after `LOCK_TTL_SECONDS`. There is no explicit "cancel reservation" flow yet. The TTL is the safety valve.
+**Lock TTL as the only cancel mechanism** — if a user selects a seat and closes the tab, the lock auto-expires after `LOCK_TTL_SECONDS`. There is no explicit "release" endpoint. The TTL is the safety valve, and the frontend displays a visible countdown to set user expectations.
 
-**Keyspace notifications are best-effort, not the source of truth**
-`notify-keyspace-events Ex` is set on the Redis service in docker-compose and the backend subscribes to `__keyevent@0__:expired` to broadcast `SEAT_RELEASED` over WebSocket. Redis delivers at most once — a missed event means a connected client's UI is stale until it polls again. This never causes an incorrect booking because: (1) the TTL still fires and the Redis key is deleted regardless of notification delivery; (2) `GET .../seats` always recomputes status from live Redis+Mongo and will return `AVAILABLE` correctly even if the WS push was lost.
+**Keyspace notifications are best-effort** — `notify-keyspace-events Ex` delivers `SEAT_RELEASED` WS pushes when TTL fires. Redis delivers at most once — a missed notification means a client's UI is stale until it polls again. This never causes an incorrect booking: the TTL still fires and the Redis key is deleted regardless; `GET .../seats` always recomputes from live Redis+Mongo and returns the correct status. Only the real-time UX is affected, not data integrity.
 
-**Roles are minted at login, not dynamically updated**
-`ADMIN_EMAILS` is an env allowlist checked at OAuth callback time. The role is baked into the JWT. Revoking admin access requires the token to expire (up to `JWT_EXPIRY_HOURS`) or a deploy with the email removed from the allowlist. Acceptable for an internal admin use case; not acceptable for a fine-grained RBAC system.
+**Roles are minted at login, not dynamically updated** — `ADMIN_EMAILS` is checked at OAuth callback time; the role is baked into the JWT. Revoking admin access requires the token to expire or a redeploy with the email removed. Acceptable for an internal admin use case; not suitable for fine-grained RBAC.
 
-**Idempotent seed for demo convenience**
-`SEED_ON_START=true` upserts a fixed set of showtimes and seats using `$setOnInsert`. It is safe to run on a populated database and will not overwrite existing data. Disabled by default.
+**No real payment integration** — booking commits as soon as the Mongo insert succeeds. A real payment step would sit between lock acquisition and the Mongo insert, with the lock held across the payment round-trip or the session tied to an idempotency key. Explicitly out of scope per the assignment brief.
 
-**No payment integration**
-Booking succeeds as soon as the Mongo insert commits. Payment is explicitly out of scope per the assignment brief.
+**Idempotent seed** — `SEED_ON_START=true` upserts 2 showtimes and 80 seats using `$setOnInsert`. Safe to run on a populated database; will not overwrite existing bookings.
