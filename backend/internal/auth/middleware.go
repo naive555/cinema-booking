@@ -11,16 +11,26 @@ import (
 
 const claimsKey = "auth.claims"
 
-// Middleware extracts and validates the Bearer JWT from the Authorization header.
+// Middleware extracts and validates the Bearer JWT.
+// Token source priority:
+//  1. Authorization: Bearer <token> header   — used by all REST requests
+//  2. ?token=<token> query param             — used by WebSocket clients, because
+//     the browser WebSocket API cannot send custom headers during the HTTP upgrade.
+//
 // On success it stores the verified *Claims under claimsKey for downstream handlers.
 func Middleware(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		header := c.GetHeader("Authorization")
-		if !strings.HasPrefix(header, "Bearer ") {
+		raw := ""
+		if h := c.GetHeader("Authorization"); strings.HasPrefix(h, "Bearer ") {
+			raw = strings.TrimPrefix(h, "Bearer ")
+		} else if q := c.Query("token"); q != "" {
+			raw = q
+		}
+		if raw == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing bearer token"})
 			return
 		}
-		claims, err := ParseToken(strings.TrimPrefix(header, "Bearer "), cfg)
+		claims, err := ParseToken(raw, cfg)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token: " + err.Error()})
 			return

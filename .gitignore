@@ -1,15 +1,42 @@
-# Ignore environment variables and executables
+# ── Environment ───────────────────────────────────────────────────────────────
+# Real secrets — never commit. Commit .env.example instead.
 .env
+.env.local
+.env.*.local
 
-# Ignore node modules
-node_modules/
-
+# ── Go ────────────────────────────────────────────────────────────────────────
+# Cross-compiled / local binaries
+backend/server_linux
+backend/server
 *.exe
 *.exe~
-/bin/
 
-# Ignore build artifacts
-/build/
-/dist/
-/target/
-server_linux
+# Go test / coverage artifacts
+*.out
+coverage.html
+
+# Vendor directory (project uses Go modules, no vendor/)
+backend/vendor/
+
+# ── Node / Frontend ───────────────────────────────────────────────────────────
+# Dependencies — never commit, reproduced by npm ci
+node_modules/
+
+# Vite build output — lives in the Docker image, not in the repo
+frontend/dist/
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+# Local overrides that might carry real secrets
+docker-compose.override.yml
+
+# ── IDE / Editor ──────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini

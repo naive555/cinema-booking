@@ -72,8 +72,10 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import api from '../lib/api'
+import { useAuthStore } from '../stores/auth'
 
 const route       = useRoute()
+const auth        = useAuthStore()
 const showtimeId  = route.params.id
 
 const seats    = ref([])
@@ -124,7 +126,12 @@ async function loadSeats() {
 
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  ws = new WebSocket(`${proto}//${location.host}/api/ws?showtimeId=${showtimeId}`)
+  // The browser WebSocket API cannot send custom headers, so we pass the JWT
+  // as a query param. The backend middleware accepts either Authorization header
+  // or ?token= for this reason.
+  ws = new WebSocket(
+    `${proto}//${location.host}/api/ws?showtimeId=${showtimeId}&token=${auth.token}`
+  )
 
   ws.onmessage = (evt) => {
     try {
@@ -134,7 +141,10 @@ function connectWS() {
     } catch {}
   }
 
-  ws.onclose = () => { setTimeout(connectWS, 2000) }
+  ws.onclose = () => {
+    // Refetch on reconnect to catch any events missed during the gap
+    setTimeout(() => { connectWS(); loadSeats() }, 2000)
+  }
 }
 
 function applyEvent(ev) {
@@ -166,7 +176,10 @@ async function onSeatClick(seat) {
     seat.status = 'LOCKED'
     startCountdown(data.expiresAt)
   } catch (e) {
+    const status = e.response?.status
     error.value = e.response?.data?.error || 'Could not hold seat'
+    // 409 = already locked/booked — refetch so we show the correct status
+    if (status === 409 || status === 410) loadSeats()
   }
 }
 
@@ -202,8 +215,14 @@ async function pay() {
     clearInterval(countdownTimer)
     setTimeout(clearHold, 1800)
   } catch (e) {
+    const status = e.response?.status
     payError.value = e.response?.data?.error || 'Payment failed'
     paying.value = false
+    // 409 = double-book caught; 410 = hold expired — clear panel and refetch
+    if (status === 409 || status === 410) {
+      clearHold()
+      loadSeats()
+    }
   }
 }
 
