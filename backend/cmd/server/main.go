@@ -60,15 +60,15 @@ func main() {
 	wsHub := realtime.NewHub()
 	go wsHub.Run()
 	go wsHub.WatchLockExpiry(appCtx, rdb, func(showtimeID, seatID string) {
-		// Write a system-triggered audit entry; no user context available at expiry time.
 		stid, _ := bson.ObjectIDFromHex(showtimeID)
-		seat, _ := bson.ObjectIDFromHex(seatID)
-		db.Collection("audit_logs").InsertOne(context.Background(), domain.AuditLog{ //nolint:errcheck
+		seatOID, _ := bson.ObjectIDFromHex(seatID)
+		if err := insertAuditLog(appCtx, db, domain.AuditLog{
 			Action:     "SEAT_RELEASED",
 			ShowtimeID: stid,
-			SeatID:     seat,
-			CreatedAt:  time.Now(),
-		})
+			SeatID:     seatOID,
+		}); err != nil {
+			log.Printf("audit: SEAT_RELEASED write failed: %v", err)
+		}
 		log.Printf("audit: SEAT_RELEASED showtime=%s seat=%s", showtimeID, seatID)
 	})
 
@@ -85,15 +85,13 @@ func main() {
 		userOID, _ := bson.ObjectIDFromHex(ev.UserID)
 
 		// (a) Write audit log — the consumer is the ONLY writer for BOOKING_SUCCESS.
-		_, err := db.Collection("audit_logs").InsertOne(context.Background(), domain.AuditLog{
+		if err := insertAuditLog(appCtx, db, domain.AuditLog{
 			Action:     ev.Action,
 			UserID:     userOID,
 			ShowtimeID: stid,
 			SeatID:     seatOID,
-			Meta:       map[string]interface{}{"bookingId": ev.BookingID, "source": "stream-consumer"},
-			CreatedAt:  time.Now(),
-		})
-		if err != nil {
+			Meta:       map[string]any{"bookingId": ev.BookingID, "source": "stream-consumer"},
+		}); err != nil {
 			log.Printf("consumer: audit write failed (will retry): %v", err)
 			return err // do NOT ack — message stays in PEL for redelivery
 		}
@@ -142,8 +140,7 @@ func main() {
 		admin := api.Group("/admin", auth.RequireRole(domain.RoleAdmin))
 		{
 			admin.GET("/ping", func(c *gin.Context) {
-				claims, _ := auth.ClaimsFromContext(c)
-				c.JSON(http.StatusOK, gin.H{"status": "ok", "authed_as": claims.Email})
+				c.JSON(http.StatusOK, gin.H{"status": "ok"})
 			})
 			admin.GET("/bookings", bookingHandler.AdminListBookings)
 			admin.GET("/audit-logs", bookingHandler.AdminListAuditLogs)
@@ -170,19 +167,29 @@ func main() {
 	// Stop background goroutines before draining HTTP.
 	appCancel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
+	httpCtx, httpCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer httpCancel()
+	if err := srv.Shutdown(httpCtx); err != nil {
 		log.Printf("http shutdown: %v", err)
 	}
-	if err := mongoClient.Disconnect(ctx); err != nil {
+
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dbCancel()
+	if err := mongoClient.Disconnect(dbCtx); err != nil {
 		log.Printf("mongo disconnect: %v", err)
 	}
+
 	if err := rdb.Close(); err != nil {
 		log.Printf("redis close: %v", err)
 	}
 	log.Println("shutdown complete")
+}
+
+// insertAuditLog stamps CreatedAt and writes a single audit entry to Mongo.
+func insertAuditLog(ctx context.Context, db *mongo.Database, entry domain.AuditLog) error {
+	entry.CreatedAt = time.Now()
+	_, err := db.Collection("audit_logs").InsertOne(ctx, entry)
+	return err
 }
 
 func healthzHandler(mc *mongo.Client, rdb *redis.Client) gin.HandlerFunc {
@@ -190,74 +197,71 @@ func healthzHandler(mc *mongo.Client, rdb *redis.Client) gin.HandlerFunc {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 		defer cancel()
 
-		code := http.StatusOK
+		healthy := true
 		resp := gin.H{}
 
 		if err := mc.Ping(ctx, nil); err != nil {
 			resp["mongo"] = "error: " + err.Error()
-			code = http.StatusServiceUnavailable
+			healthy = false
 		} else {
 			resp["mongo"] = "ok"
 		}
 
 		if err := rdb.Ping(ctx).Err(); err != nil {
 			resp["redis"] = "error: " + err.Error()
-			code = http.StatusServiceUnavailable
+			healthy = false
 		} else {
 			resp["redis"] = "ok"
 		}
 
-		if code == http.StatusOK {
+		if healthy {
 			resp["status"] = "ok"
+			c.JSON(http.StatusOK, resp)
 		} else {
 			resp["status"] = "degraded"
+			c.JSON(http.StatusServiceUnavailable, resp)
 		}
-		c.JSON(code, resp)
 	}
 }
 
 func connectMongo(cfg *config.Config) *mongo.Client {
-	const maxAttempts = 10
-	var lastErr error
-	for i := 1; i <= maxAttempts; i++ {
-		client, err := mongo.Connect(options.Client().ApplyURI(cfg.MongoURI))
-		if err == nil {
-			pingCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			err = client.Ping(pingCtx, nil)
-			cancel()
-		}
-		if err == nil {
-			log.Printf("mongo: connected")
-			return client
-		}
-		lastErr = err
-		wait := time.Duration(i) * 500 * time.Millisecond
-		log.Printf("mongo: not ready (attempt %d/%d): %v — retrying in %s", i, maxAttempts, err, wait)
-		time.Sleep(wait)
+	client, err := mongo.Connect(options.Client().ApplyURI(cfg.MongoURI))
+	if err != nil {
+		log.Fatalf("mongo: %v", err)
 	}
-	log.Fatalf("mongo: gave up after %d attempts: %v", maxAttempts, lastErr)
-	return nil
+	retryConnect("mongo", func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return client.Ping(ctx, nil)
+	})
+	return client
 }
 
 func connectRedis(cfg *config.Config) *redis.Client {
-	const maxAttempts = 10
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     cfg.RedisAddr,
 		Password: cfg.RedisPassword,
 	})
+	retryConnect("redis", func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return rdb.Ping(ctx).Err()
+	})
+	return rdb
+}
+
+// retryConnect calls ping up to 10 times with linear backoff, fatal on exhaustion.
+func retryConnect(name string, ping func() error) {
+	const maxAttempts = 10
 	var lastErr error
 	for i := 1; i <= maxAttempts; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		lastErr = rdb.Ping(ctx).Err()
-		cancel()
-		if lastErr == nil {
-			log.Printf("redis: connected")
-			return rdb
+		if lastErr = ping(); lastErr == nil {
+			log.Printf("%s: connected", name)
+			return
 		}
 		wait := time.Duration(i) * 500 * time.Millisecond
-		log.Printf("redis: not ready (attempt %d/%d): %v — retrying in %s", i, maxAttempts, lastErr, wait)
+		log.Printf("%s: not ready (attempt %d/%d): %v — retrying in %s", name, i, maxAttempts, lastErr, wait)
 		time.Sleep(wait)
 	}
-	log.Fatalf("redis: gave up after %d attempts: %v", maxAttempts, lastErr)
-	return nil
+	log.Fatalf("%s: gave up after %d attempts: %v", name, maxAttempts, lastErr)
 }
