@@ -60,11 +60,13 @@
         <option value="">All actions</option>
         <option v-for="a in auditActions" :key="a" :value="a">{{ a }}</option>
       </select>
-      <button @click="loadAudit" style="padding:6px 16px;background:#1a1a2e;color:#fff;border:none;border-radius:4px">Filter</button>
+      <button @click="filterAudit" style="padding:6px 16px;background:#1a1a2e;color:#fff;border:none;border-radius:4px">Filter</button>
     </div>
 
     <p v-if="aLoading" style="color:#888">Loading audit logs…</p>
-    <div v-if="!aLoading" style="font-size:0.85em;color:#555;margin-bottom:8px">{{ auditTotal }} event(s)</div>
+    <div v-if="!aLoading" style="font-size:0.85em;color:#555;margin-bottom:8px">
+      {{ auditTotal }} event(s) &nbsp;·&nbsp; page {{ auditPage }} / {{ auditTotalPages }}
+    </div>
 
     <table v-if="auditLogs.length" style="width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08);font-size:0.85em">
       <thead style="background:#f5f5f5">
@@ -85,6 +87,11 @@
       </tbody>
     </table>
     <p v-else-if="!aLoading" style="color:#888">No logs match this filter.</p>
+
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button @click="auditPrevPage" :disabled="auditPage<=1" style="padding:6px 14px;border:1px solid #ccc;background:#fff;border-radius:4px">Prev</button>
+      <button @click="auditNextPage" :disabled="auditPage>=auditTotalPages" style="padding:6px 14px;border:1px solid #ccc;background:#fff;border-radius:4px">Next</button>
+    </div>
   </div>
 </template>
 
@@ -108,10 +115,12 @@ const showtimeMap   = ref({})  // showtimeId → movieTitle, loaded once on moun
 const copied        = ref('')  // tracks which userId was last copied (for ✓ feedback)
 
 // Audit
-const auditLogs   = ref([])
-const auditTotal  = ref(0)
-const aLoading    = ref(false)
-const auditAction = ref('')
+const auditLogs       = ref([])
+const auditTotal      = ref(0)
+const auditPage       = ref(1)
+const auditTotalPages = ref(1)
+const aLoading        = ref(false)
+const auditAction     = ref('')
 
 let copiedTimer = null
 function copyText(text) {
@@ -149,15 +158,20 @@ async function load() {
 async function loadAudit() {
   aLoading.value = true
   try {
-    const params = { limit: 20 }
+    const params = { page: auditPage.value, limit: 20 }
     if (auditAction.value) params.action = auditAction.value
     const { data } = await api.get('/admin/audit-logs', { params })
-    auditLogs.value  = data.logs
-    auditTotal.value = data.total
+    auditLogs.value       = data.logs
+    auditTotal.value      = data.total
+    auditTotalPages.value = data.totalPages
   } catch {} finally {
     aLoading.value = false
   }
 }
+
+function filterAudit() { auditPage.value = 1; loadAudit() }
+function auditPrevPage() { if (auditPage.value > 1) { auditPage.value--; loadAudit() } }
+function auditNextPage() { if (auditPage.value < auditTotalPages.value) { auditPage.value++; loadAudit() } }
 
 function clearF() {
   f.value = { movieTitle: '', date: '', userId: '' }
