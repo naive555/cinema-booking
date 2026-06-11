@@ -99,28 +99,42 @@
 import { ref, onMounted } from 'vue'
 import api from '../lib/api'
 
+const PAGE_LIMIT = 20
+
 const bHeaders = ['Booking ID', 'Movie / Showtime', 'Seat', 'User', 'Booked At']
 const aHeaders = ['Action', 'Showtime', 'Seat', 'Meta', 'At']
 const auditActions = ['SEAT_LOCKED', 'BOOKING_SUCCESS', 'SEAT_RELEASED', 'BOOKING_TIMEOUT', 'LOCK_FAIL', 'BOOKING_DUPLICATE']
 
 // Bookings
-const bookings      = ref([])
-const total         = ref(0)
-const page          = ref(1)
-const totalPages    = ref(1)
-const bLoading      = ref(false)
-const bError        = ref('')
-const f             = ref({ movieTitle: '', date: '', userId: '' })
-const showtimeMap   = ref({})  // showtimeId → movieTitle, loaded once on mount
-const copied        = ref('')  // tracks which userId was last copied (for ✓ feedback)
+const bookings    = ref([])
+const total       = ref(0)
+const bLoading    = ref(false)
+const bError      = ref('')
+const f           = ref({ movieTitle: '', date: '', userId: '' })
+const showtimeMap = ref({})  // showtimeId → movieTitle, loaded once on mount
+const copied      = ref('')  // tracks which userId was last copied (for ✓ feedback)
 
 // Audit
-const auditLogs       = ref([])
-const auditTotal      = ref(0)
-const auditPage       = ref(1)
-const auditTotalPages = ref(1)
-const aLoading        = ref(false)
-const auditAction     = ref('')
+const auditLogs   = ref([])
+const auditTotal  = ref(0)
+const aLoading    = ref(false)
+const auditAction = ref('')
+
+// Shared pagination factory — function declarations are hoisted so load/loadAudit
+// can be passed before their definitions appear in source order.
+function usePagination(loadFn) {
+  const page       = ref(1)
+  const totalPages = ref(1)
+  const prev  = () => { if (page.value > 1)               { page.value--; loadFn() } }
+  const next  = () => { if (page.value < totalPages.value) { page.value++; loadFn() } }
+  const reset = () => { page.value = 1; loadFn() }
+  return { page, totalPages, prev, next, reset }
+}
+
+const { page, totalPages, prev: prevPage, next: nextPage, reset: search } =
+  usePagination(load)
+const { page: auditPage, totalPages: auditTotalPages, prev: auditPrevPage, next: auditNextPage, reset: filterAudit } =
+  usePagination(loadAudit)
 
 let copiedTimer = null
 function copyText(text) {
@@ -131,16 +145,11 @@ function copyText(text) {
   })
 }
 
-async function search() {
-  page.value = 1
-  await load()
-}
-
 async function load() {
   bLoading.value = true
   bError.value   = ''
   try {
-    const params = { page: page.value, limit: 20 }
+    const params = { page: page.value, limit: PAGE_LIMIT }
     if (f.value.movieTitle) params.movieTitle = f.value.movieTitle
     if (f.value.date)       params.date       = f.value.date
     if (f.value.userId)     params.userId     = f.value.userId
@@ -158,7 +167,7 @@ async function load() {
 async function loadAudit() {
   aLoading.value = true
   try {
-    const params = { page: auditPage.value, limit: 20 }
+    const params = { page: auditPage.value, limit: PAGE_LIMIT }
     if (auditAction.value) params.action = auditAction.value
     const { data } = await api.get('/admin/audit-logs', { params })
     auditLogs.value       = data.logs
@@ -169,18 +178,11 @@ async function loadAudit() {
   }
 }
 
-function filterAudit() { auditPage.value = 1; loadAudit() }
-function auditPrevPage() { if (auditPage.value > 1) { auditPage.value--; loadAudit() } }
-function auditNextPage() { if (auditPage.value < auditTotalPages.value) { auditPage.value++; loadAudit() } }
-
 function clearF() {
   f.value = { movieTitle: '', date: '', userId: '' }
   page.value = 1
   load()
 }
-
-function prevPage() { if (page.value > 1) { page.value--; load() } }
-function nextPage() { if (page.value < totalPages.value) { page.value++; load() } }
 
 function fmt(iso) {
   return new Date(iso).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
