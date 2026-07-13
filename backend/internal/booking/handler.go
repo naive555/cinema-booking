@@ -182,6 +182,61 @@ func (h *Handler) Pay(c *gin.Context) {
 	})
 }
 
+type releaseReq struct {
+	OwnerToken string `json:"ownerToken" binding:"required"`
+}
+
+type releaseResp struct {
+	Released bool `json:"released"`
+}
+
+// Release voluntarily gives up a seat hold before its TTL expires (user cancel).
+// DELETE /api/showtimes/:showtimeId/seats/:seatId/select
+//
+// The Lua release script only DELs the lock key — unlike TTL expiry, a DEL
+// does not fire a Redis keyspace "expired" event, so WatchLockExpiry never
+// observes a manual release. This handler is therefore the only place that
+// writes the SEAT_RELEASED audit row and broadcasts it for the cancel path.
+func (h *Handler) Release(c *gin.Context) {
+	showtimeHex, seatHex, showtimeID, seatID, ok := parseParams(c)
+	if !ok {
+		return
+	}
+
+	var req releaseReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ownerToken is required"})
+		return
+	}
+
+	claims, _ := auth.ClaimsFromContext(c)
+	ctx := c.Request.Context()
+
+	key := lock.KeyFor(showtimeHex, seatHex)
+	released, err := h.locker.Release(ctx, key, req.OwnerToken)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "lock release failed"})
+		return
+	}
+	if !released {
+		// Wrong token, or the lock already expired/was reclaimed by someone
+		// else — idempotent no-op: no audit row, no broadcast.
+		c.JSON(http.StatusOK, releaseResp{Released: false})
+		return
+	}
+
+	h.writeAudit(ctx, "SEAT_RELEASED", claims, showtimeID, seatID, map[string]interface{}{"source": "user-cancel"})
+
+	h.hub.Broadcast(showtimeHex, realtime.Event{
+		Type:   "SEAT_RELEASED",
+		SeatID: seatHex,
+		Status: string(domain.StatusAvailable),
+		At:     time.Now(),
+	})
+
+	c.JSON(http.StatusOK, releaseResp{Released: true})
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func parseParams(c *gin.Context) (showtimeHex, seatHex string, showtimeID, seatID bson.ObjectID, ok bool) {

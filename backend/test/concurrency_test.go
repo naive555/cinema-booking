@@ -134,6 +134,28 @@ func doPay(token, showtimeID, seatID, ownerToken string) int {
 	return resp.StatusCode
 }
 
+func doRelease(token, showtimeID, seatID, ownerToken string) (released bool, status int) {
+	body, _ := json.Marshal(map[string]string{"ownerToken": ownerToken})
+	req, _ := http.NewRequest("DELETE",
+		fmt.Sprintf("%s/api/showtimes/%s/seats/%s/select", testBaseURL(), showtimeID, seatID),
+		bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, -1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, resp.StatusCode
+	}
+	var out struct {
+		Released bool `json:"released"`
+	}
+	json.NewDecoder(resp.Body).Decode(&out)
+	return out.Released, http.StatusOK
+}
+
 // ── Scenario 1: 50 goroutines all do select -> pay on the same seat ───────────
 
 // TestConcurrentSelectPay proves that exactly one booking is created when N

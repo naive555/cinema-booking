@@ -90,6 +90,64 @@ func TestPayWrongOwnerToken_Returns410(t *testing.T) {
 	}
 }
 
+// TestRelease_ThenReselect proves that an explicit release frees the seat
+// immediately — a different user can select it right away rather than waiting
+// out the lock TTL.
+func TestRelease_ThenReselect(t *testing.T) {
+	const showtimeID = "000000000000000000000001"
+	tok := mintToken(t, "release-user@apitest.com")
+
+	seatID, _, _ := findAvailableSeat(t, tok, showtimeID)
+
+	ownerToken, status := doSelect(tok, showtimeID, seatID)
+	if status != http.StatusOK {
+		t.Fatalf("select: want 200, got %d", status)
+	}
+
+	released, relStatus := doRelease(tok, showtimeID, seatID, ownerToken)
+	if relStatus != http.StatusOK {
+		t.Fatalf("release: want 200, got %d", relStatus)
+	}
+	if !released {
+		t.Fatal("release: want released=true")
+	}
+
+	tok2 := mintToken(t, "release-user2@apitest.com")
+	_, status2 := doSelect(tok2, showtimeID, seatID)
+	if status2 != http.StatusOK {
+		t.Errorf("re-select after release: want 200, got %d", status2)
+	}
+}
+
+// TestRelease_WrongToken_DoesNotRelease proves that releasing with a token
+// that doesn't own the lock is a no-op — the seat stays held and a second
+// select on it is rejected with 409.
+func TestRelease_WrongToken_DoesNotRelease(t *testing.T) {
+	const showtimeID = "000000000000000000000001"
+	tok := mintToken(t, "release-wrong@apitest.com")
+
+	seatID, _, _ := findAvailableSeat(t, tok, showtimeID)
+
+	_, status := doSelect(tok, showtimeID, seatID)
+	if status != http.StatusOK {
+		t.Fatalf("select: want 200, got %d", status)
+	}
+
+	released, relStatus := doRelease(tok, showtimeID, seatID, "00000000-0000-0000-0000-000000000000")
+	if relStatus != http.StatusOK {
+		t.Fatalf("release with wrong token: want 200, got %d", relStatus)
+	}
+	if released {
+		t.Fatal("release with wrong token: want released=false")
+	}
+
+	tok2 := mintToken(t, "release-wrong2@apitest.com")
+	_, status2 := doSelect(tok2, showtimeID, seatID)
+	if status2 != http.StatusConflict {
+		t.Errorf("select on still-held seat: want 409, got %d", status2)
+	}
+}
+
 // ── Role enforcement ──────────────────────────────────────────────────────────
 
 // TestAdminBookings_UserToken_Returns403 proves the admin endpoint is unreachable

@@ -134,6 +134,7 @@ func main() {
 		api.GET("/showtimes", showtimeHandler.ListShowtimes)
 		api.GET("/showtimes/:showtimeId/seats", seatHandler.GetSeatMap)
 		api.POST("/showtimes/:showtimeId/seats/:seatId/select", bookingHandler.Select)
+		api.DELETE("/showtimes/:showtimeId/seats/:seatId/select", bookingHandler.Release)
 		api.POST("/showtimes/:showtimeId/seats/:seatId/pay", bookingHandler.Pay)
 
 		// WebSocket — auth enforced by parent middleware via Authorization header

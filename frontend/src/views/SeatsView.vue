@@ -226,9 +226,22 @@ async function pay() {
   }
 }
 
-function cancelHold() {
-  const s = seats.value.find(x => x.id === selected.value?.id)
-  // We can't release the lock from the frontend; it will expire naturally.
+async function cancelHold() {
+  const seatId = selected.value?.id
+  const ownerToken = selected.value?.ownerToken
+  const s = seats.value.find(x => x.id === seatId)
+
+  // Best-effort: ask the backend to release the lock immediately so the seat
+  // is free for others right away instead of sitting LOCKED until the TTL
+  // expires. If this fails the seat just falls back to the timeout path.
+  if (seatId && ownerToken) {
+    try {
+      await api.delete(`/showtimes/${showtimeId}/seats/${seatId}/select`, {
+        data: { ownerToken },
+      })
+    } catch {}
+  }
+
   // Optimistically mark it available so the user isn't stuck seeing it as LOCKED.
   if (s && !paid.value) s.status = 'AVAILABLE'
   clearHold()

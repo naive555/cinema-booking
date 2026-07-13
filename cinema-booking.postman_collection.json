@@ -174,6 +174,39 @@
           }
         },
         {
+          "name": "Release Seat Hold (cancel)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "var json = pm.response.json();",
+                  "pm.test('Has released flag', () => pm.expect(json.released).to.be.a('boolean'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization",  "value": "Bearer {{token}}" },
+              { "key": "Content-Type",   "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"ownerToken\": \"{{owner_token}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/showtimes/{{showtime_id}}/seats/{{seat_id}}/select",
+              "host": ["{{base_url}}"],
+              "path": ["api", "showtimes", "{{showtime_id}}", "seats", "{{seat_id}}", "select"]
+            },
+            "description": "Explicit cancel: releases the seat lock before its TTL expires so it frees up for others immediately.\nReturns { released: true } if this call actually deleted the lock, or { released: false } if the ownerToken was wrong or the lock had already expired/been reclaimed (idempotent no-op — no audit row, no broadcast in that case).\nOn success, writes a SEAT_RELEASED audit log (meta.source=\"user-cancel\") and broadcasts SEAT_RELEASED over WebSocket — the TTL-expiry watcher never fires for a manual DEL, so this endpoint is the only source of that event for the cancel path."
+          }
+        },
+        {
           "name": "Pay (confirm booking)",
           "event": [
             {

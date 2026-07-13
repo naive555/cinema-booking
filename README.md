@@ -105,6 +105,23 @@ flowchart TD
         -> seat returns to AVAILABLE on all connected browsers
 ```
 
+### Cancel path (explicit release)
+
+```
+DELETE /api/showtimes/:id/seats/:seatId/select   { ownerToken }
+        -> Lua script: GET key -> compare -> DEL (same atomic owner check as pay)
+        -> released=false (no-op) if ownerToken is wrong or the lock already
+           expired/was reclaimed by someone else — no audit row, no broadcast
+        -> released=true  -> writes SEAT_RELEASED AuditLog (meta.source="user-cancel")
+                           -> SEAT_RELEASED WS event pushed to all clients
+                           -> seat flips to AVAILABLE immediately, not after the TTL
+```
+
+The frontend's Cancel button calls this endpoint best-effort before clearing its own
+hold panel — see the DEL-vs-expired-notification note in §4 for why the handler must
+broadcast explicitly instead of relying on the same keyspace-notification path as the
+timeout case above.
+
 ### Auth flow
 
 ```
@@ -187,6 +204,8 @@ end
 ```
 
 Without atomicity, a slow client whose TTL already fired could `DEL` a key now owned by a different client. The Lua script makes check-then-delete a single Redis operation.
+
+**DEL vs. expired — why the explicit release endpoint broadcasts manually:** Redis only fires a keyspace `expired` event when a key's TTL naturally counts down to zero; an explicit `DEL` (what the Lua release script above does) is silent — no keyspace notification, ever. `WatchLockExpiry` (§3's timeout path) only listens for `expired` events, so it never observes a manual release. The `Release` handler (§3's cancel path) therefore writes the `SEAT_RELEASED` audit row and calls `hub.Broadcast` itself, synchronously, in the same request — it cannot piggyback on the expiry watcher the way the timeout path does.
 
 **Why not Redlock:** Redlock is for multi-node deployments where partial writes and clock drift are real. This system runs a single Redis node — `SET NX EX` is both correct and sufficient here.
 
