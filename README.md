@@ -198,7 +198,8 @@ Without atomicity, a slow client whose TTL already fired could `DEL` a key now o
 
 1. Writes a `BOOKING_SUCCESS` `AuditLog` to MongoDB (`meta.source = "stream-consumer"` proves the async path ran).
 2. Logs a mock notification: `NOTIFY: emailed <user> about booking <id>`.
-3. `XACK` only after both succeed; on failure the message stays in the PEL and is redelivered on restart.
+3. `XACK` only after both succeed; on failure the message stays in the PEL (pending entries list) for retry.
+4. A separate ticker goroutine runs `XAUTOCLAIM` every 15s, reclaiming any entry that has sat unacked for 30s+ (owner crashed, or errored and never came back) and reprocessing it through the same handler — no restart required. An entry reclaimed more than 5 times is written to `events:booking:dead` and ACKed off the main stream instead of being retried forever, so one permanently-failing message can't loop indefinitely.
 
 **Recorded evidence (stream -> consumer -> audit log):**
 ```
@@ -215,7 +216,7 @@ event {"action":"BOOKING_SUCCESS","bookingId":"6a29253b9539d4af7c263a56",
 { action: "BOOKING_SUCCESS", meta: { source: "stream-consumer" }, createdAt: "2026-06-10T08:50:03.905Z" }
 ```
 
-**Why Streams over Pub/Sub:** Pub/Sub loses messages if no subscriber is connected at publish time. An audit log that silently drops records on restart is unacceptable. Streams persist entries until explicitly trimmed; unACKed messages are redelivered.
+**Why Streams over Pub/Sub:** Pub/Sub loses messages if no subscriber is connected at publish time. An audit log that silently drops records on restart is unacceptable. Streams persist entries until explicitly trimmed; unACKed messages stay in the PEL and are reclaimed by the `XAUTOCLAIM` loop described above.
 
 **Why Streams over RabbitMQ:** Redis is already in the stack for locking. Adding RabbitMQ means a third infrastructure component, a separate Go AMQP client, and additional ops surface area for no correctness benefit at single-service scale.
 

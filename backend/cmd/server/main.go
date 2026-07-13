@@ -77,7 +77,10 @@ func main() {
 	//   (a) writes the AuditLog to Mongo   — durable record of every confirmed booking
 	//   (b) sends a mock email notification — replace with real mailer in production
 	// XACK is sent only after both steps succeed; on failure the message stays
-	// in the PEL and will be redelivered on next startup or via XAUTOCLAIM.
+	// in the PEL. A ticker inside StartConsumer runs XAUTOCLAIM every 15s to
+	// reclaim entries idle >30s (crashed consumer, or this one erroring and
+	// retrying later); after 5 delivery attempts a message is moved to the
+	// events:booking:dead stream instead of being retried forever.
 	qClient := queue.New(rdb)
 	go qClient.StartConsumer(appCtx, "cinema-consumers", "consumer-1", func(ev queue.Event) error {
 		stid, _ := bson.ObjectIDFromHex(ev.ShowtimeID)
