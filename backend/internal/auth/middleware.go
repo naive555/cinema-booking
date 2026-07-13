@@ -13,9 +13,12 @@ const claimsKey = "auth.claims"
 
 // Middleware extracts and validates the Bearer JWT.
 // Token source priority:
-//  1. Authorization: Bearer <token> header   — used by all REST requests
-//  2. ?token=<token> query param             — used by WebSocket clients, because
-//     the browser WebSocket API cannot send custom headers during the HTTP upgrade.
+//  1. Authorization: Bearer <token> header        — used by all REST requests
+//  2. Sec-WebSocket-Protocol: bearer, <token>      — used by WebSocket clients,
+//     because the browser WebSocket API cannot set the Authorization header
+//     during the HTTP upgrade. golang-jwt emits unpadded base64url, which is a
+//     safe subprotocol token charset. The token never appears in the URL, so
+//     it can't leak into access logs, history, or the Referer header.
 //
 // On success it stores the verified *Claims under claimsKey for downstream handlers.
 func Middleware(cfg *config.Config) gin.HandlerFunc {
@@ -23,8 +26,11 @@ func Middleware(cfg *config.Config) gin.HandlerFunc {
 		raw := ""
 		if h := c.GetHeader("Authorization"); strings.HasPrefix(h, "Bearer ") {
 			raw = strings.TrimPrefix(h, "Bearer ")
-		} else if q := c.Query("token"); q != "" {
-			raw = q
+		} else if sp := c.GetHeader("Sec-WebSocket-Protocol"); sp != "" {
+			parts := strings.Split(sp, ",")
+			if len(parts) == 2 && strings.TrimSpace(parts[0]) == "bearer" {
+				raw = strings.TrimSpace(parts[1])
+			}
 		}
 		if raw == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing bearer token"})

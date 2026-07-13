@@ -12,7 +12,10 @@ const router = useRouter()
 const auth   = useAuthStore()
 
 onMounted(() => {
-  const token = route.query.token
+  // The backend sends the JWT in the URL fragment (#token=...), not a query
+  // param, so it's never sent to any server and never lands in access logs
+  // or the Referer header on the next navigation.
+  const token = new URLSearchParams(route.hash.slice(1)).get('token')
   if (token) {
     auth.setToken(token)
     router.replace('/')

@@ -126,11 +126,13 @@ async function loadSeats() {
 
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  // The browser WebSocket API cannot send custom headers, so we pass the JWT
-  // as a query param. The backend middleware accepts either Authorization header
-  // or ?token= for this reason.
+  // The browser WebSocket API cannot set custom headers during the upgrade,
+  // so the JWT travels as a WS subprotocol ("bearer, <jwt>") instead of a URL
+  // query param — it never appears in the URL, so it can't leak into access
+  // logs, browser history, or a Referer header.
   ws = new WebSocket(
-    `${proto}//${location.host}/api/ws?showtimeId=${showtimeId}&token=${auth.token}`
+    `${proto}//${location.host}/api/ws?showtimeId=${showtimeId}`,
+    ['bearer', auth.token]
   )
 
   ws.onmessage = (evt) => {

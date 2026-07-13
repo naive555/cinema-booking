@@ -99,9 +99,13 @@ func (h *Handler) Callback(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token mint failed"})
 		return
 	}
-	// Redirect to the SPA callback route so it can store the token.
+	// Redirect to the SPA callback route so it can store the token. The token
+	// travels in the URL fragment (#), not a query param: fragments are never
+	// sent to the server by the browser, so they never reach access/proxy logs
+	// or leak via the Referer header on the next navigation. A production
+	// upgrade would swap this for a one-time code exchanged server-side.
 	// FRONTEND_URL defaults to http://localhost (nginx on port 80).
-	c.Redirect(http.StatusFound, h.cfg.FrontendURL+"/auth/callback?token="+tokenStr)
+	c.Redirect(http.StatusFound, h.cfg.FrontendURL+"/auth/callback#token="+tokenStr)
 }
 
 // Me returns the authenticated caller's identity from the JWT claims.

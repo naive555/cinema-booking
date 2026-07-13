@@ -165,10 +165,15 @@ func parseLockKey(key string) (showtimeID, seatID string) {
 
 // ── WebSocket upgrade ─────────────────────────────────────────────────────────
 
+// Subprotocols lists "bearer" so gorilla/websocket both accepts a client
+// offering it and echoes it back in the handshake response — browsers abort
+// the connection if a requested subprotocol isn't echoed. The auth middleware
+// reads the JWT out of this same header (see auth.Middleware).
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin:     func(r *http.Request) bool { return true },
+	Subprotocols:    []string{"bearer"},
 }
 
 // Handler upgrades an HTTP connection to WebSocket and registers the client

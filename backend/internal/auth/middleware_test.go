@@ -50,6 +50,18 @@ func do(r *gin.Engine, token string) int {
 	return w.Code
 }
 
+// doSubprotocol sends the token the way a browser WebSocket client does:
+// via Sec-WebSocket-Protocol instead of an Authorization header.
+func doSubprotocol(r *gin.Engine, subprotocol string) int {
+	req := httptest.NewRequest(http.MethodGet, "/probe", nil)
+	if subprotocol != "" {
+		req.Header.Set("Sec-WebSocket-Protocol", subprotocol)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w.Code
+}
+
 // ── Middleware ────────────────────────────────────────────────────────────────
 
 func TestMiddleware_NoToken_Returns401(t *testing.T) {
@@ -86,6 +98,48 @@ func TestMiddleware_ValidToken_Returns200(t *testing.T) {
 	r := routerWith(auth.Middleware(cfg), func(c *gin.Context) { c.Status(200) })
 	if got := do(r, tok); got != http.StatusOK {
 		t.Errorf("want 200, got %d", got)
+	}
+}
+
+func TestMiddleware_ValidSubprotocol_Returns200(t *testing.T) {
+	cfg := minimalCfg()
+	tok := mintFor(t, domain.RoleUser)
+	r := routerWith(auth.Middleware(cfg), func(c *gin.Context) { c.Status(200) })
+	if got := doSubprotocol(r, "bearer, "+tok); got != http.StatusOK {
+		t.Errorf("want 200, got %d", got)
+	}
+}
+
+func TestMiddleware_GarbageSubprotocolToken_Returns401(t *testing.T) {
+	cfg := minimalCfg()
+	r := routerWith(auth.Middleware(cfg), func(c *gin.Context) { c.Status(200) })
+	if got := doSubprotocol(r, "bearer, not.a.jwt"); got != http.StatusUnauthorized {
+		t.Errorf("want 401, got %d", got)
+	}
+}
+
+func TestMiddleware_SubprotocolMissingBearerPrefix_Returns401(t *testing.T) {
+	cfg := minimalCfg()
+	tok := mintFor(t, domain.RoleUser)
+	r := routerWith(auth.Middleware(cfg), func(c *gin.Context) { c.Status(200) })
+	// Just the raw token, no "bearer" protocol alongside it.
+	if got := doSubprotocol(r, tok); got != http.StatusUnauthorized {
+		t.Errorf("want 401, got %d", got)
+	}
+}
+
+func TestMiddleware_AuthHeaderWinsOverSubprotocol(t *testing.T) {
+	cfg := minimalCfg()
+	tok := mintFor(t, domain.RoleUser)
+	r := routerWith(auth.Middleware(cfg), func(c *gin.Context) { c.Status(200) })
+
+	req := httptest.NewRequest(http.MethodGet, "/probe", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Sec-WebSocket-Protocol", "bearer, garbage-not-a-jwt")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("want 200 (Authorization header must take priority), got %d", w.Code)
 	}
 }
 
