@@ -2,7 +2,8 @@
 // Requires: docker compose up with DEV_AUTH=true and SEED_ON_START=true.
 //
 // Run:  make test-concurrency   (from repo root)
-//   or: go test -v -count=1 -run TestConcurrent ./test/...  (from backend/)
+//
+//	or: go test -v -count=1 -run TestConcurrent ./test/...  (from backend/)
 package test
 
 import (

@@ -33,12 +33,12 @@ var (
 // Currently only BOOKING_SUCCESS events are published; other state changes
 // are either written inline (SEAT_LOCKED) or broadcast over WebSocket.
 type Event struct {
-	Action     string `json:"action"`     // BOOKING_SUCCESS
+	Action     string `json:"action"` // BOOKING_SUCCESS
 	BookingID  string `json:"bookingId"`
 	ShowtimeID string `json:"showtimeId"`
 	SeatID     string `json:"seatId"`
 	UserID     string `json:"userId"`
-	UserEmail  string `json:"userEmail"`  // used by consumer for mock notification
+	UserEmail  string `json:"userEmail"` // used by consumer for mock notification
 }
 
 // Client wraps a Redis client for stream operations.

@@ -24,7 +24,9 @@ func mintAdminToken(t *testing.T, email string) string {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("mintAdminToken %s: status %d — is DEV_AUTH=true running?", email, resp.StatusCode)
 	}
-	var out struct{ Token string `json:"token"` }
+	var out struct {
+		Token string `json:"token"`
+	}
 	json.NewDecoder(resp.Body).Decode(&out)
 	return out.Token
 }
