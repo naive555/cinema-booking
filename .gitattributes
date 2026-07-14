@@ -1,0 +1,5 @@
+# Normalize all text files to LF on checkout, regardless of the checking-out
+# machine's core.autocrlf setting. Without this, Windows checkouts convert
+# committed LF files to CRLF locally, which gofmt (and any Unix-style tooling)
+# then flags as unformatted even though the repository content is correct.
+* text=auto eol=lf
