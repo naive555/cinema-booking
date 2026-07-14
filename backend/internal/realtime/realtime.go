@@ -42,19 +42,50 @@ type roomMsg struct {
 // Hub owns per-showtime rooms. All state mutations run in the Run goroutine
 // so the rooms map is never accessed concurrently — no mutex needed.
 type Hub struct {
-	rooms      map[string]map[*client]bool
-	register   chan *client
-	unregister chan *client
-	broadcast  chan roomMsg
+	rooms          map[string]map[*client]bool
+	register       chan *client
+	unregister     chan *client
+	broadcast      chan roomMsg
+	allowedOrigins map[string]bool
+	upgrader       websocket.Upgrader
 }
 
-func NewHub() *Hub {
-	return &Hub{
-		rooms:      make(map[string]map[*client]bool),
-		register:   make(chan *client, 64),
-		unregister: make(chan *client, 64),
-		broadcast:  make(chan roomMsg, 256),
+// NewHub builds a Hub whose WebSocket upgrader only accepts connections whose
+// Origin header (case-insensitive, trailing slash ignored) is in
+// allowedOrigins. A request with no Origin header at all — non-browser
+// clients, curl, server-to-server, tests — is always allowed, since only
+// browsers send Origin.
+func NewHub(allowedOrigins ...string) *Hub {
+	h := &Hub{
+		rooms:          make(map[string]map[*client]bool),
+		register:       make(chan *client, 64),
+		unregister:     make(chan *client, 64),
+		broadcast:      make(chan roomMsg, 256),
+		allowedOrigins: make(map[string]bool, len(allowedOrigins)),
 	}
+	for _, o := range allowedOrigins {
+		h.allowedOrigins[normalizeOrigin(o)] = true
+	}
+	h.upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin:     h.checkOrigin,
+		Subprotocols:    []string{"bearer"},
+	}
+	return h
+}
+
+func normalizeOrigin(o string) string {
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(o), "/"))
+}
+
+// checkOrigin rejects any browser-sent Origin that isn't in the allowlist.
+func (h *Hub) checkOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	return h.allowedOrigins[normalizeOrigin(origin)]
 }
 
 // Run serialises all hub state changes. Must be called in its own goroutine.
@@ -164,17 +195,13 @@ func parseLockKey(key string) (showtimeID, seatID string) {
 }
 
 // ── WebSocket upgrade ─────────────────────────────────────────────────────────
-
-// Subprotocols lists "bearer" so gorilla/websocket both accepts a client
-// offering it and echoes it back in the handshake response — browsers abort
-// the connection if a requested subprotocol isn't echoed. The auth middleware
-// reads the JWT out of this same header (see auth.Middleware).
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin:     func(r *http.Request) bool { return true },
-	Subprotocols:    []string{"bearer"},
-}
+//
+// The upgrader itself lives on Hub (see NewHub) so CheckOrigin can consult
+// the Hub's allowedOrigins. Its Subprotocols field lists "bearer" so
+// gorilla/websocket both accepts a client offering it and echoes it back in
+// the handshake response — browsers abort the connection if a requested
+// subprotocol isn't echoed. The auth middleware reads the JWT out of that
+// same header (see auth.Middleware).
 
 // Handler upgrades an HTTP connection to WebSocket and registers the client
 // in the showtime room given by ?showtimeId=. Auth is enforced by the parent
@@ -186,7 +213,7 @@ func (h *Hub) Handler(c *gin.Context) {
 		return
 	}
 
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("ws upgrade: %v", err)
 		return

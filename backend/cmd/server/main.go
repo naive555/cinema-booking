@@ -57,7 +57,7 @@ func main() {
 	appCtx, appCancel := context.WithCancel(context.Background())
 
 	// ── realtime hub ──────────────────────────────────────────────────────────
-	wsHub := realtime.NewHub()
+	wsHub := realtime.NewHub(cfg.FrontendURL)
 	go wsHub.Run()
 	go wsHub.WatchLockExpiry(appCtx, rdb, func(showtimeID, seatID string) {
 		stid, _ := bson.ObjectIDFromHex(showtimeID)
