@@ -5,6 +5,7 @@ package realtime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -155,7 +156,11 @@ func (h *Hub) WatchLockExpiry(ctx context.Context, rdb *redis.Client, onExpiry O
 		log.Printf("realtime: ConfigSet notify-keyspace-events failed: %v (continuing — flag may already be set via redis.conf)", err)
 	}
 
-	pubsub := rdb.PSubscribe(ctx, "__keyevent@0__:expired")
+	// The keyspace channel name is per-DB (e.g. __keyevent@0__:expired for DB 0).
+	// Deriving it from the client's own configured DB instead of hardcoding 0
+	// keeps this working if REDIS_DB is ever set to something else.
+	channel := fmt.Sprintf("__keyevent@%d__:expired", rdb.Options().DB)
+	pubsub := rdb.PSubscribe(ctx, channel)
 	defer pubsub.Close()
 
 	log.Println("realtime: watching seat lock expiry events")
