@@ -53,7 +53,12 @@ func (h *Handler) Login(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "state generation failed"})
 		return
 	}
-	c.SetCookie(stateCookie, state, 300, "/", "", false, true)
+	// Lax (not Strict) because this cookie must still be sent when the browser
+	// lands back on this origin via Google's top-level redirect after consent.
+	// Secure is conditional on FRONTEND_URL's scheme so local http:// dev still
+	// works — browsers silently drop Secure cookies over plain HTTP.
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(stateCookie, state, 300, "/", "", h.secureCookies(), true)
 	c.Redirect(http.StatusFound, h.oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOnline))
 }
 
@@ -66,7 +71,8 @@ func (h *Handler) Callback(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid oauth state"})
 		return
 	}
-	c.SetCookie(stateCookie, "", -1, "/", "", false, true) // clear after use
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(stateCookie, "", -1, "/", "", h.secureCookies(), true) // clear after use
 
 	code := c.Query("code")
 	if code == "" {
@@ -207,6 +213,14 @@ func (h *Handler) upsertUser(ctx context.Context, email, name string, role domai
 		return nil, fmt.Errorf("upsert user %q: %w", email, err)
 	}
 	return &user, nil
+}
+
+// secureCookies reports whether the Secure flag should be set on cookies this
+// handler issues. Tied to FRONTEND_URL's scheme rather than hardcoded true so
+// local http://localhost development still receives the state cookie —
+// browsers silently drop Secure cookies set over a plain HTTP response.
+func (h *Handler) secureCookies() bool {
+	return strings.HasPrefix(h.cfg.FrontendURL, "https")
 }
 
 func randomHex(n int) (string, error) {
