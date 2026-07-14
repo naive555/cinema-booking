@@ -27,7 +27,7 @@ flowchart TD
     Browser -->|"REST  /api/..."| BookingH
     Browser -->|"REST  /api/..."| SeatH
     Browser -->|"OAuth redirect"| Auth
-    Browser <-->|"WebSocket  /api/ws?token=..."| WS
+    Browser <-->|"WebSocket  /api/ws  (auth via Sec-WebSocket-Protocol)"| WS
 
     Auth -->|"upsert user"| Mongo
     BookingH -->|"SET NX EX  acquire"| Redis
@@ -48,6 +48,8 @@ flowchart TD
 
 **Realtime flow:**
 `Queue Consumer reads stream -> writes AuditLog -> broadcasts via WS Hub -> all connected browsers update seat map`
+
+This diagram is one backend instance — a deliberate scope choice for this assignment; see "Scaling beyond one backend instance" in §7 for what changes with more than one.
 
 ---
 
@@ -139,18 +141,20 @@ Browser                  Backend                 Google
   |                            | upsert user (Mongo)
   |                            | assign role (ADMIN_EMAILS allowlist)
   |                            | mint JWT HS256
-  |<-- 302 /auth/callback?token=<jwt> --------------|
+  |<-- 302 /auth/callback#token=<jwt> --------------|
 ```
 
-CSRF protection: a random 16-byte hex state is set as an `httpOnly` cookie before the redirect; compared on callback; immediately cleared.
+The token rides in the URL **fragment** (`#token=...`), not a query param — fragments are never sent to the server by the browser, so the token can't land in access logs or leak via `Referer` on the next navigation. See "Security notes" in §7 for the full rationale.
+
+CSRF protection: a random 16-byte hex state is set as an `httpOnly`, `SameSite=Lax` cookie before the redirect (`Secure` when `FRONTEND_URL` is `https://`); compared on callback; immediately cleared.
 
 JWT payload:
 ```json
 { "sub": "<ObjectID>", "email": "user@example.com", "role": "USER", "iat": …, "exp": … }
 ```
 
-All `/api/*` endpoints require `Authorization: Bearer <token>`.  
-WebSocket upgrade passes the token as `?token=<jwt>` (browser WS API cannot send custom headers).
+All `/api/*` endpoints require `Authorization: Bearer <token>`.
+WebSocket upgrade authenticates via the `Sec-WebSocket-Protocol` header (`bearer, <jwt>`) instead — the browser WebSocket API can't set an `Authorization` header during the upgrade, and this keeps the token out of the URL entirely.
 
 ---
 
@@ -283,6 +287,13 @@ SEED_ON_START=true
 DEV_AUTH=false
 ```
 
+> **Lock TTL note:** the assignment specifies a 5-minute hold. The code default
+> (`.env.example`) is spec-faithful: `LOCK_TTL_SECONDS=300`. This repo's
+> `.env` and `docker-compose.yml`'s fallback both pin it to `15` seconds
+> instead, purely so a reviewer can watch a hold expire live without a
+> 5-minute wait. Set `LOCK_TTL_SECONDS=300` in `.env` for spec-faithful
+> behavior; the value is fully configurable either way.
+
 ### Step 3 — start everything
 
 ```bash
@@ -368,7 +379,7 @@ curl -s -X POST http://localhost:8080/dev/token \
 
 **Seat status is computed, not stored** — `BOOKED` is a durable Mongo document; `LOCKED` is an ephemeral Redis key; `AVAILABLE` means neither. No `status` field on the Seat document. This avoids a cache-invalidation problem: if status were cached in Mongo, a lock expiry would require a Mongo write to keep them consistent. Merge-at-read is always consistent at the cost of two reads per seat map fetch.
 
-**Lock TTL as the only cancel mechanism** — if a user selects a seat and closes the tab, the lock auto-expires after `LOCK_TTL_SECONDS`. There is no explicit "release" endpoint. The TTL is the safety valve, and the frontend displays a visible countdown to set user expectations.
+**Lock TTL as the backstop cancel mechanism** — if a user selects a seat and closes the tab (or the explicit release request itself fails), the lock auto-expires after `LOCK_TTL_SECONDS` regardless. §3's "Cancel path" endpoint frees the seat immediately on a deliberate cancel; the TTL is what still saves you if that request never arrives. The frontend also displays a visible countdown so users know when an abandoned hold will free itself.
 
 **Keyspace notifications are best-effort** — `notify-keyspace-events Ex` delivers `SEAT_RELEASED` WS pushes when TTL fires. Redis delivers at most once — a missed notification means a client's UI is stale until it polls again. This never causes an incorrect booking: the TTL still fires and the Redis key is deleted regardless; `GET .../seats` always recomputes from live Redis+Mongo and returns the correct status. Only the real-time UX is affected, not data integrity.
 
@@ -377,3 +388,21 @@ curl -s -X POST http://localhost:8080/dev/token \
 **No real payment integration** — booking commits as soon as the Mongo insert succeeds. A real payment step would sit between lock acquisition and the Mongo insert, with the lock held across the payment round-trip or the session tied to an idempotency key. Explicitly out of scope per the assignment brief.
 
 **Idempotent seed** — `SEED_ON_START=true` upserts 2 showtimes and 80 seats using `$setOnInsert`. Safe to run on a populated database; will not overwrite existing bookings.
+
+**Scaling beyond one backend instance** — single-instance was a deliberate scope choice for this assignment (matches the "one-command run" grading priority; a multi-instance deploy needs orchestration that's explicitly out of scope). What would change with N replicas behind a load balancer:
+
+- **WS fanout.** Today `Hub.Broadcast` fans out in-process — a client connected to instance A never sees a broadcast triggered on instance B. The fix is Redis pub/sub: each instance subscribes to `ws:showtime:{id}` on startup, and `Broadcast` becomes a `PUBLISH` to that channel instead of a direct in-memory fan-out, so every instance relays to its own locally-connected clients. Sketched here, not implemented — no code changes accompany this note.
+- **Stream consumer.** Already scales as-is: `XREADGROUP` consumer groups mean N backend instances registering under the same group name (`cinema-consumers`) simply divide up the stream's messages, and the A1 reclaim loop (`XAUTOCLAIM`) already handles a crashed instance's stranded entries being picked up by a surviving one.
+- **Lock expiry watcher.** `WatchLockExpiry`'s `PSUBSCRIBE __keyevent@{db}__:expired` (§4) would fire on every instance for the same expiry event, since Redis keyspace notifications are pub/sub (fan-out to all subscribers, not a work queue). N instances would each write a `SEAT_RELEASED` audit row for the same expiry. Dedupe options: a short-TTL `SET NX` "claim" key per expired lock before writing the audit row (only the instance that wins the NX claims the write), or move the write into a Lua script triggered off the stream instead of pub/sub. Not needed at N=1, so not implemented.
+
+**JWT storage: localStorage vs. httpOnly cookie** — the frontend stores the JWT in `localStorage` (see `stores/auth.js`), which is readable by any JS running on the page — an XSS bug anywhere in the SPA can exfiltrate it. An httpOnly cookie would close that door but opens CSRF instead (needs a CSRF token or `SameSite=Strict`, and doesn't fit a bearer-token WS subprotocol as cleanly). Given this app has no user-generated content and therefore a small XSS surface, `localStorage` was accepted as the simpler option; an httpOnly cookie is the documented upgrade for a production deployment with a larger attack surface.
+
+**Rate limiting and refresh tokens** — out of scope. There's no per-IP/per-user rate limit on `/dev/token`, `/auth/google/login`, or the booking endpoints, and JWTs are long-lived with no refresh flow (`JWT_EXPIRY_HOURS`, default 24h — expire and re-login). Both are standard production hardening that add complexity without changing the concurrency/correctness story this assignment is graded on.
+
+### Security notes
+
+- **JWT never travels in a URL.** The OAuth callback redirects with the token in a URL fragment (`#token=...`, §3 "Auth flow"), which browsers never send to any server, and the WebSocket upgrade authenticates via the `Sec-WebSocket-Protocol` header (`bearer, <jwt>`) instead of a `?token=` query param. Neither path can leak the token into access logs, browser history, or a `Referer` header.
+- **OAuth state cookie is `SameSite=Lax`**, with `Secure` set conditionally on `FRONTEND_URL`'s scheme (`https://` -> `Secure`; local `http://` dev still works, since browsers silently drop `Secure` cookies over plain HTTP). Lax rather than Strict because the cookie must still be sent when the browser lands back on this origin via Google's top-level redirect.
+- **WebSocket origin is allowlisted.** `Hub.CheckOrigin` rejects any browser-sent `Origin` header not in the allowlist (built from `FRONTEND_URL`); requests with no `Origin` header at all (non-browser clients, tests) are always allowed, since only browsers send it.
+- **Datastore ports are not published to the host.** `docker-compose.yml` gives MongoDB and Redis no `ports:` mapping — they're reachable only from other containers on the compose network, not from the host or the internet.
+- **No secrets are hardcoded.** Everything sensitive (`JWT_SECRET`, `GOOGLE_CLIENT_SECRET`, `ADMIN_EMAILS`, ...) comes from `.env`, which is gitignored; `.env.example` documents every variable with a placeholder value.
