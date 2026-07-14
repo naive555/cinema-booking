@@ -313,7 +313,9 @@ Subsequent runs use the layer cache and start in seconds.
 
 ### Step 5 — make yourself an admin
 
-In `.env`, set:
+**With DEV_AUTH (Option A):** no env change needed — the dev-login form has a role dropdown; pick **ADMIN** and log in with any email. `POST /dev/token` mints whatever role you ask for directly; it does not consult `ADMIN_EMAILS` at all, since there's no OAuth identity to check it against.
+
+**With real Google OAuth (Option B):** role comes from the `ADMIN_EMAILS` allowlist instead, checked at OAuth callback time. In `.env`, set:
 ```ini
 ADMIN_EMAILS=your-email@example.com
 ```
@@ -323,7 +325,7 @@ Then restart the backend so it re-reads the env:
 docker compose up -d --force-recreate backend
 ```
 
-Log in with that email (OAuth or dev-login with that exact address). The JWT will carry `"role":"ADMIN"` and the **Admin** nav link will appear.
+Log in with that exact email via **Sign in with Google**. The JWT will carry `"role":"ADMIN"` and the **Admin** nav link will appear.
 
 ### Running the concurrency test
 
