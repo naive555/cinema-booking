@@ -43,7 +43,7 @@
     >
       <p style="margin-top:0;font-size:1em">
         Holding seat <strong>{{ selected.row }}{{ selected.number }}</strong>
-        &nbsp;—&nbsp; expires in <strong style="color:#e94560">{{ countdown }}s</strong>
+        &nbsp;—&nbsp; expires in <strong style="color:#e94560">{{ countdownLabel }}</strong>
       </p>
       <button
         @click="pay"
@@ -90,6 +90,9 @@ const events   = ref([])     // last 5 realtime event labels
 
 let ws             = null
 let countdownTimer = null
+let reconnectTimer = null
+let reconnectDelay = 1000   // ms; doubles per failed attempt, capped at 15s
+let closedByUs      = false // true once onUnmounted intentionally closes the socket
 
 const legend = [
   { label: 'Available', color: '#4caf50' },
@@ -104,6 +107,12 @@ const seatsByRow = computed(() => {
     ;(map[s.row] ??= []).push(s)
   }
   return map
+})
+
+const countdownLabel = computed(() => {
+  const m = Math.floor(countdown.value / 60)
+  const s = countdown.value % 60
+  return `${m}:${String(s).padStart(2, '0')}`
 })
 
 function seatStyle(seat) {
@@ -135,6 +144,10 @@ function connectWS() {
     ['bearer', auth.token]
   )
 
+  ws.onopen = () => {
+    reconnectDelay = 1000 // connection succeeded — reset backoff for next time
+  }
+
   ws.onmessage = (evt) => {
     try {
       const ev = JSON.parse(evt.data)
@@ -144,8 +157,17 @@ function connectWS() {
   }
 
   ws.onclose = () => {
-    // Refetch on reconnect to catch any events missed during the gap
-    setTimeout(() => { connectWS(); loadSeats() }, 2000)
+    // onUnmounted closes the socket on navigation away from this view; that
+    // close must NOT trigger a reconnect, or the timer outlives the component.
+    if (closedByUs) return
+    // Refetch on reconnect to catch any events missed during the gap.
+    // Backoff (1s, 2s, 4s, ... capped at 15s) avoids hammering the backend
+    // if it's down for a while.
+    reconnectTimer = setTimeout(() => {
+      connectWS()
+      loadSeats()
+    }, reconnectDelay)
+    reconnectDelay = Math.min(reconnectDelay * 2, 15000)
   }
 }
 
@@ -264,6 +286,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  closedByUs = true
+  clearTimeout(reconnectTimer)
   ws?.close()
   clearInterval(countdownTimer)
 })
